@@ -1,0 +1,10 @@
+# 인증서 및 민감 파일 (절대 커밋 금지)
+ssl/certs/
+
+# Python
+__pycache__/
+*.pyc
+venv/
+
+# macOS
+.DS_Store
