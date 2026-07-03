@@ -90,14 +90,15 @@ openssl verify -CAfile certs/{domain}/ca-chain.crt certs/{domain}/ssl.crt
 
 ### 1. 인증 정보 설정
 
-`ssl_workflow.py` 상단의 기본 인증 정보를 설정합니다:
+API 키는 코드에 하드코딩하지 않고 **환경변수**로 설정합니다 (공개 저장소이므로 키 커밋 절대 금지):
 
-```python
-DEFAULT_AUTH = {
-    "id": "cdnetworks",
-    "api_key": "***REMOVED-REVOKED-KEY***"
-}
+```bash
+# ~/.zshrc 에 추가
+export ONS_API_KEY="<발급받은 API 키>"
+export ONS_API_ID="cdnetworks"   # 기본값이므로 생략 가능
 ```
+
+`ssl_workflow.py`는 실행 시 `ONS_API_KEY` 환경변수를 읽으며, 미설정 시 오류로 종료됩니다. `--api-key` 옵션으로 일회성 지정도 가능합니다.
 
 ### 2. 의존성 확인
 
@@ -218,7 +219,7 @@ python3 ssl_workflow.py new \
 **실제 명령어:**
 ```bash
 python3 ssl_api_manager.py staging-deploy \
-  --id cdnetworks --api-key ***REMOVED-REVOKED-KEY*** \
+  --id cdnetworks --api-key $ONS_API_KEY \
   --ssl-cert fullchain.pem --ssl-key key.pem \
   --domain-list "cdn.example.com,api.example.com" \
   --memo "2026년 4월 신규 인증서 등록"
@@ -253,7 +254,7 @@ python3 ssl_workflow.py renew \
 **실제 명령어:**
 ```bash
 python3 ssl_api_manager.py staging-update \
-  --id cdnetworks --api-key ***REMOVED-REVOKED-KEY*** \
+  --id cdnetworks --api-key $ONS_API_KEY \
   --ssl-file-name data.dsc4.net \
   --ssl-cert certs/data.dsc4.net/fullchain.pem \
   --ssl-key certs/data.dsc4.net/ssl.key \
@@ -284,13 +285,13 @@ python3 ssl_workflow.py domains \
 ```bash
 # 추가
 python3 ssl_api_manager.py staging-update \
-  --id cdnetworks --api-key ***REMOVED-REVOKED-KEY*** \
+  --id cdnetworks --api-key $ONS_API_KEY \
   --ssl-file-name wildcard.example.com \
   --add-domain-list "new.example.com,extra.example.com"
 
 # 삭제
 python3 ssl_api_manager.py staging-update \
-  --id cdnetworks --api-key ***REMOVED-REVOKED-KEY*** \
+  --id cdnetworks --api-key $ONS_API_KEY \
   --ssl-file-name wildcard.example.com \
   --del-domain-list "old.example.com"
 ```
@@ -311,12 +312,12 @@ python3 ssl_workflow.py lookup --ssl-file-name data.dsc4.net --verify
 ```bash
 # 기본 조회
 python3 ssl_api_manager.py lookup \
-  --id cdnetworks --api-key ***REMOVED-REVOKED-KEY*** \
+  --id cdnetworks --api-key $ONS_API_KEY \
   --ssl-file-name data.dsc4.net
 
 # 상세 검증
 python3 ssl_api_manager.py lookup \
-  --id cdnetworks --api-key ***REMOVED-REVOKED-KEY*** \
+  --id cdnetworks --api-key $ONS_API_KEY \
   --ssl-file-name data.dsc4.net --verify
 ```
 
@@ -414,8 +415,8 @@ goal: |
   3. deploy 로 최종 배포
   4. 결과를 요약하여 Slack으로 전송
 
-  스크립트 경로: /Users/shlee/leesh/mynotes/ons-api-tools/ssl/ssl_api_manager.py
-  인증정보: id=cdnetworks, api-key=***REMOVED-REVOKED-KEY***
+  스크립트 경로: /Users/shlee/mynotes/ons-api-tools/ssl/ssl_api_manager.py
+  인증정보: id=cdnetworks, api-key=$ONS_API_KEY
 ```
 
 **조회만 실행:**
@@ -426,8 +427,8 @@ goal: |
   인증서: data.dsc4.net
   검증 포함: true
 
-  스크립트 경로: /Users/shlee/leesh/mynotes/ons-api-tools/ssl/ssl_api_manager.py
-  인증정보: id=cdnetworks, api-key=***REMOVED-REVOKED-KEY***
+  스크립트 경로: /Users/shlee/mynotes/ons-api-tools/ssl/ssl_api_manager.py
+  인증정보: id=cdnetworks, api-key=$ONS_API_KEY
 ```
 
 ---
@@ -438,7 +439,7 @@ Staging 배포 후 문제가 발견되면 취소할 수 있습니다.
 
 ```bash
 python3 ssl_api_manager.py staging-cancel \
-  --id cdnetworks --api-key ***REMOVED-REVOKED-KEY*** \
+  --id cdnetworks --api-key $ONS_API_KEY \
   --ssl-file-name wildcard.example.com
 ```
 

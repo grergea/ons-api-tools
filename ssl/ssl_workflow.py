@@ -22,15 +22,14 @@ from typing import Optional
 
 
 # --- Configuration ---
+# API key must come from the environment (never hardcode: public repository)
 DEFAULT_AUTH = {
-    "id": "cdnetworks",
-    "api_key": "***REMOVED-REVOKED-KEY***"
+    "id": os.environ.get("ONS_API_ID", "cdnetworks"),
+    "api_key": os.environ.get("ONS_API_KEY", "")
 }
 
 SCRIPT_DIR = Path(__file__).parent
-# ssl_api_manager.py is located in the ons-api-tools/ssl/ directory
-# From ssl-certificate-workflow/, go up 4 levels to reach mynotes/
-MANAGER_SCRIPT = Path("/Users/shlee/leesh/mynotes/ons-api-tools/ssl/ssl_api_manager.py")
+MANAGER_SCRIPT = SCRIPT_DIR / "ssl_api_manager.py"
 
 
 # --- Helper Functions ---
@@ -412,9 +411,13 @@ def run_manager_command(command: list) -> dict:
 
 def get_auth_params(id: str = None, api_key: str = None) -> dict:
     """Get authentication parameters."""
+    key = api_key or DEFAULT_AUTH["api_key"]
+    if not key:
+        print_error("API key not set. Set the ONS_API_KEY environment variable or pass --api-key.")
+        sys.exit(1)
     return {
         "id": id or DEFAULT_AUTH["id"],
-        "api_key": api_key or DEFAULT_AUTH["api_key"]
+        "api_key": key
     }
 
 
