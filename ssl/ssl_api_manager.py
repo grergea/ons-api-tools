@@ -10,7 +10,6 @@ import argparse
 import json
 import os
 import sys
-from typing import Any
 
 import requests
 
@@ -23,10 +22,12 @@ API_URLS = {
     "deploy": f"{BASE_URL}/update",
     "staging_cancel": f"{BASE_URL}/staging/cancel",
     "history": f"{BASE_URL}/history",
+    "list": f"{BASE_URL}/list",
 }
 
 
 # --- Helper Functions ---
+
 
 def handle_response(response: requests.Response) -> None:
     """Print the formatted JSON response from the API."""
@@ -40,7 +41,10 @@ def handle_response(response: requests.Response) -> None:
         result_code = api_response.get("result_code", "")
         if result_code != "200":
             result_msg = api_response.get("result_msg", "Unknown error")
-            print(f"\n[Warning] API returned non-success code: {result_code} - {result_msg}", file=sys.stderr)
+            print(
+                f"\n[Warning] API returned non-success code: {result_code} - {result_msg}",
+                file=sys.stderr,
+            )
 
     except requests.exceptions.HTTPError as http_err:
         print(f"HTTP error occurred: {http_err}", file=sys.stderr)
@@ -90,6 +94,7 @@ def validate_file(file_path: str) -> str:
 
 # --- API Call Functions ---
 
+
 def staging_deploy(args: argparse.Namespace) -> None:
     """Deploy a new SSL certificate to staging environment."""
     try:
@@ -113,10 +118,7 @@ def staging_deploy(args: argparse.Namespace) -> None:
                 "ssl_key": (os.path.basename(key_path), key_file),
             }
             response = requests.post(
-                API_URLS["staging_deploy"],
-                data=data,
-                files=files,
-                timeout=60
+                API_URLS["staging_deploy"], data=data, files=files, timeout=60
             )
             handle_response(response)
 
@@ -159,14 +161,17 @@ def staging_update(args: argparse.Namespace) -> None:
                     "ssl_key": (os.path.basename(key_path), key_file),
                 }
             elif args.ssl_cert or args.ssl_key:
-                print("Warning: Both --ssl-cert and --ssl-key must be provided together for certificate renewal.", file=sys.stderr)
+                print(
+                    "Warning: Both --ssl-cert and --ssl-key must be provided together for certificate renewal.",
+                    file=sys.stderr,
+                )
                 sys.exit(1)
 
             response = requests.post(
                 API_URLS["staging_update"],
                 data=data,
                 files=files if files else None,
-                timeout=60
+                timeout=60,
             )
             handle_response(response)
 
@@ -188,11 +193,7 @@ def deploy(args: argparse.Namespace) -> None:
         # Convert to multipart/form-data format
         files = {key: (None, value) for key, value in data.items()}
 
-        response = requests.post(
-            API_URLS["deploy"],
-            files=files,
-            timeout=60
-        )
+        response = requests.post(API_URLS["deploy"], files=files, timeout=60)
         handle_response(response)
 
     except ValueError as e:
@@ -209,11 +210,7 @@ def staging_cancel(args: argparse.Namespace) -> None:
         # Convert to multipart/form-data format
         files = {key: (None, value) for key, value in data.items()}
 
-        response = requests.post(
-            API_URLS["staging_cancel"],
-            files=files,
-            timeout=60
-        )
+        response = requests.post(API_URLS["staging_cancel"], files=files, timeout=60)
         handle_response(response)
 
     except ValueError as e:
@@ -229,18 +226,13 @@ def history(args: argparse.Namespace) -> None:
         payload = {
             "api_request": {
                 "common": auth_params,
-                "data": {
-                    "ssl_file_name": args.ssl_file_name
-                }
+                "data": {"ssl_file_name": args.ssl_file_name},
             }
         }
 
         headers = {"Content-Type": "application/json"}
         response = requests.post(
-            API_URLS["history"],
-            json=payload,
-            headers=headers,
-            timeout=60
+            API_URLS["history"], json=payload, headers=headers, timeout=60
         )
         handle_response(response)
 
@@ -260,18 +252,13 @@ def lookup(args: argparse.Namespace) -> None:
         payload = {
             "api_request": {
                 "common": auth_params,
-                "data": {
-                    "ssl_file_name": args.ssl_file_name
-                }
+                "data": {"ssl_file_name": args.ssl_file_name},
             }
         }
 
         headers = {"Content-Type": "application/json"}
         response = requests.post(
-            API_URLS["history"],
-            json=payload,
-            headers=headers,
-            timeout=60
+            API_URLS["history"], json=payload, headers=headers, timeout=60
         )
         response.raise_for_status()
         data = response.json()
@@ -280,7 +267,9 @@ def lookup(args: argparse.Namespace) -> None:
         result_code = api_response.get("result_code", "")
         if result_code != "200":
             result_msg = api_response.get("result_msg", "Unknown error")
-            print(f"[Error] API returned: {result_code} - {result_msg}", file=sys.stderr)
+            print(
+                f"[Error] API returned: {result_code} - {result_msg}", file=sys.stderr
+            )
             sys.exit(1)
 
         history_data = api_response.get("data", {})
@@ -301,49 +290,60 @@ def lookup(args: argparse.Namespace) -> None:
             # deploy_history doesn't have pv_ip, we just note it exists
             pass
 
-        print(f"\n{'='*60}")
+        print(f"\n{'=' * 60}")
         print(f"SSL Certificate Lookup: {args.ssl_file_name}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
         print(f"Staging Server IP: {staging_ip or 'N/A'}")
         print(f"Staging Deploy Time: {staging_datetime or 'N/A'}")
         print(f"Deploy Status: {'Deployed' if deploy_history else 'Not Deployed'}")
-        print(f"{'='*60}")
+        print(f"{'=' * 60}")
 
         # SSL verification if requested and we have staging IP
         if args.verify and staging_ip:
             print(f"\n[Verifying certificate on {staging_ip}...]")
 
             # Get the primary domain from staging history or use ssl_file_name as fallback
-            primary_domain = staging_history[0].get("cname", "").split(".58.wskam.com")[0] if staging_history else args.ssl_file_name
-            if ".58.wskam.com" not in staging_history[0].get("cname", "") if staging_history else True:
+            primary_domain = (
+                staging_history[0].get("cname", "").split(".58.wskam.com")[0]
+                if staging_history
+                else args.ssl_file_name
+            )
+            if (
+                ".58.wskam.com" not in staging_history[0].get("cname", "")
+                if staging_history
+                else True
+            ):
                 primary_domain = args.ssl_file_name
 
             try:
                 cmd = [
-                    "openssl", "s_client",
-                    "-connect", f"{staging_ip}:443",
-                    "-servername", primary_domain
+                    "openssl",
+                    "s_client",
+                    "-connect",
+                    f"{staging_ip}:443",
+                    "-servername",
+                    primary_domain,
                 ]
                 proc = subprocess.run(
-                    cmd,
-                    input=b"",
-                    stdin=subprocess.DEVNULL,
-                    capture_output=True,
-                    timeout=15
+                    cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=15
                 )
 
                 # Extract certificate info
                 cert_cmd = [
-                    "openssl", "x509",
+                    "openssl",
+                    "x509",
                     "-noout",
-                    "-dates", "-subject", "-issuer", "-serial"
+                    "-dates",
+                    "-subject",
+                    "-issuer",
+                    "-serial",
                 ]
                 cert_proc = subprocess.run(
                     cert_cmd,
                     input=proc.stdout,
                     capture_output=True,
                     text=True,
-                    timeout=10
+                    timeout=10,
                 )
 
                 if cert_proc.returncode == 0:
@@ -361,7 +361,7 @@ def lookup(args: argparse.Namespace) -> None:
                         elif "serial=" in line:
                             dates["serial"] = line.split("=", 1)[1].strip()
 
-                    print(f"\nCertificate Details:")
+                    print("\nCertificate Details:")
                     print(f"  Subject: {dates.get('subject', 'N/A')}")
                     print(f"  Issuer: {dates.get('issuer', 'N/A')}")
                     print(f"  Serial: {dates.get('serial', 'N/A')}")
@@ -372,6 +372,7 @@ def lookup(args: argparse.Namespace) -> None:
                     if dates.get("notAfter"):
                         try:
                             from datetime import datetime
+
                             date_formats = [
                                 "%b %d %H:%M:%S %Y %Z",
                                 "%b %d %H:%M:%S %Y GMT",
@@ -379,21 +380,31 @@ def lookup(args: argparse.Namespace) -> None:
                             expiry_date = None
                             for fmt in date_formats:
                                 try:
-                                    expiry_date = datetime.strptime(dates["notAfter"], fmt)
+                                    expiry_date = datetime.strptime(
+                                        dates["notAfter"], fmt
+                                    )
                                     break
                                 except ValueError:
                                     continue
 
                             if expiry_date:
-                                now = datetime.now(expiry_date.tzinfo) if expiry_date.tzinfo else datetime.now()
+                                now = (
+                                    datetime.now(expiry_date.tzinfo)
+                                    if expiry_date.tzinfo
+                                    else datetime.now()
+                                )
                                 days_left = (expiry_date - now).days
 
                                 if days_left < 0:
                                     status_color = "\033[91m[EXPIRED]\033[0m"
                                 elif days_left <= 30:
-                                    status_color = f"\033[93m[EXPIRES IN {days_left} DAYS]\033[0m"
+                                    status_color = (
+                                        f"\033[93m[EXPIRES IN {days_left} DAYS]\033[0m"
+                                    )
                                 else:
-                                    status_color = f"\033[92m[VALID - {days_left} days]\033[0m"
+                                    status_color = (
+                                        f"\033[92m[VALID - {days_left} days]\033[0m"
+                                    )
 
                                 print(f"  Status: {status_color}")
                         except Exception:
@@ -401,28 +412,34 @@ def lookup(args: argparse.Namespace) -> None:
 
                     # Verify certificate chain
                     verify_cmd = [
-                        "openssl", "s_client",
-                        "-connect", f"{staging_ip}:443",
-                        "-servername", primary_domain
+                        "openssl",
+                        "s_client",
+                        "-connect",
+                        f"{staging_ip}:443",
+                        "-servername",
+                        primary_domain,
                     ]
                     verify_proc = subprocess.run(
                         verify_cmd + ["-verify_return_error"],
-                        input=b"",
                         stdin=subprocess.DEVNULL,
                         capture_output=True,
-                        timeout=15
+                        timeout=15,
                     )
 
                     if verify_proc.returncode == 0:
-                        print(f"  Chain Verification: \033[92mOK\033[0m")
+                        print("  Chain Verification: \033[92mOK\033[0m")
                     else:
-                        print(f"  Chain Verification: \033[91mFAILED\033[0m")
+                        print("  Chain Verification: \033[91mFAILED\033[0m")
 
                     print(f"\n  CNAME: {staging_history[0].get('cname', 'N/A')}")
-                    print(f"  Service Domain: {staging_history[0].get('service_domain', 'N/A')}")
-                    print(f"  Success Rate: {staging_history[0].get('success_rate', 'N/A')}")
+                    print(
+                        f"  Service Domain: {staging_history[0].get('service_domain', 'N/A')}"
+                    )
+                    print(
+                        f"  Success Rate: {staging_history[0].get('success_rate', 'N/A')}"
+                    )
                 else:
-                    print(f"\033[91m[Failed to parse certificate]\033[0m")
+                    print("\033[91m[Failed to parse certificate]\033[0m")
                     if cert_proc.stderr:
                         print(f"  Error: {cert_proc.stderr.strip()}")
 
@@ -441,7 +458,102 @@ def lookup(args: argparse.Namespace) -> None:
         sys.exit(1)
 
 
+def _fetch_ssl_list_page(auth_params: dict, page: int) -> dict:
+    """Fetch a single page of the SSL certificate list."""
+    payload = {
+        "api_request": {
+            "common": auth_params,
+            "data": {"page": page},
+        }
+    }
+    headers = {"Content-Type": "application/json"}
+    response = requests.post(
+        API_URLS["list"], json=payload, headers=headers, timeout=60
+    )
+    response.raise_for_status()
+    return response.json()
+
+
+def list_certs(args: argparse.Namespace) -> None:
+    """List all SSL certificates registered on the ONS CDN platform.
+
+    The API paginates results (page_size 10 as observed), so every page
+    is fetched and merged before filtering/display.
+    """
+    try:
+        auth_params = get_json_auth_params(args)
+
+        ssl_list = []
+        total_count = 0
+        page = 1
+        while True:
+            data = _fetch_ssl_list_page(auth_params, page)
+
+            api_response = data.get("api_response", {})
+            result_code = api_response.get("result_code", "")
+            if result_code != "200":
+                result_msg = api_response.get("result_msg", "Unknown error")
+                print(
+                    f"[Error] API returned: {result_code} - {result_msg}",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
+
+            list_data = api_response.get("data", {})
+            total_count = list_data.get("total_count", 0)
+            page_items = list_data.get("ssl_list", [])
+            ssl_list.extend(page_items)
+
+            if not page_items or len(ssl_list) >= total_count:
+                break
+            page += 1
+
+        if args.domain:
+            ssl_list = [
+                cert
+                for cert in ssl_list
+                if any(args.domain in d for d in cert.get("domain_list", []))
+            ]
+
+        print(f"\n{'=' * 70}")
+        header = f"SSL Certificate List (전체: {total_count}개"
+        if args.domain:
+            header += f", '{args.domain}' 필터 적용 후: {len(ssl_list)}개"
+        header += ")"
+        print(header)
+        print(f"{'=' * 70}")
+
+        if not ssl_list:
+            print("일치하는 인증서가 없습니다.")
+            print()
+            return
+
+        for cert in ssl_list:
+            is_active = cert.get("is_active", "N")
+            active_marker = (
+                "\033[92m[ACTIVE]\033[0m"
+                if is_active == "Y"
+                else "\033[90m[INACTIVE]\033[0m"
+            )
+            print(f"\n{active_marker} {cert.get('ssl_file_name', 'N/A')}")
+            print(f"  Domains: {', '.join(cert.get('domain_list', []))}")
+            print(f"  Expires: {cert.get('expires_at', 'N/A')}")
+            print(f"  Updated: {cert.get('updated_at', 'N/A')}")
+            if cert.get("memo"):
+                print(f"  Memo: {cert.get('memo')}")
+
+        print(f"\n{'=' * 70}\n")
+
+    except requests.exceptions.RequestException as e:
+        print(f"[Error] Request failed: {e}", file=sys.stderr)
+        sys.exit(1)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
 # --- Argument Parser Setup ---
+
 
 def create_parser() -> argparse.ArgumentParser:
     """Create and configure the argument parser."""
@@ -461,121 +573,107 @@ Examples:
 
   # Check deployment history
   %(prog)s history --id admin --password pass --ssl-file-name example.com
-        """
+
+  # List all registered certificates (filter by domain)
+  %(prog)s list --id admin --password pass --domain example.com
+        """,
     )
 
     subparsers = parser.add_subparsers(
-        dest="command",
-        required=True,
-        help="Available commands"
+        dest="command", required=True, help="Available commands"
     )
 
     # Common authentication arguments
     auth_parser = argparse.ArgumentParser(add_help=False)
-    auth_parser.add_argument(
-        "--id",
-        required=True,
-        help="User Portal account ID"
-    )
+    auth_parser.add_argument("--id", required=True, help="User Portal account ID")
     auth_group = auth_parser.add_mutually_exclusive_group(required=True)
+    auth_group.add_argument("--password", help="User Portal account password")
     auth_group.add_argument(
-        "--password",
-        help="User Portal account password"
-    )
-    auth_group.add_argument(
-        "--api-key",
-        dest="api_key",
-        help="User Portal account API KEY"
+        "--api-key", dest="api_key", help="User Portal account API KEY"
     )
 
     # --- staging-deploy command ---
     parser_staging_deploy = subparsers.add_parser(
         "staging-deploy",
         help="Deploy a new SSL certificate to staging",
-        parents=[auth_parser]
+        parents=[auth_parser],
     )
     parser_staging_deploy.add_argument(
         "--ssl-cert",
         dest="ssl_cert",
         required=True,
-        help="Path to the SSL certificate file (.crt)"
+        help="Path to the SSL certificate file (.crt)",
     )
     parser_staging_deploy.add_argument(
         "--ssl-key",
         dest="ssl_key",
         required=True,
-        help="Path to the SSL private key file (.key)"
+        help="Path to the SSL private key file (.key)",
     )
     parser_staging_deploy.add_argument(
         "--ssl-key-password",
         dest="ssl_key_password",
-        help="Password for encrypted key file"
+        help="Password for encrypted key file",
     )
     parser_staging_deploy.add_argument(
         "--domain-list",
         dest="domain_list",
-        help="Comma-separated list of domains for the certificate"
+        help="Comma-separated list of domains for the certificate",
     )
-    parser_staging_deploy.add_argument(
-        "--memo",
-        help="Memo for the deployment"
-    )
+    parser_staging_deploy.add_argument("--memo", help="Memo for the deployment")
     parser_staging_deploy.set_defaults(func=staging_deploy)
 
     # --- staging-update command ---
     parser_staging_update = subparsers.add_parser(
         "staging-update",
         help="Update an existing SSL certificate in staging",
-        parents=[auth_parser]
+        parents=[auth_parser],
     )
     parser_staging_update.add_argument(
         "--ssl-file-name",
         dest="ssl_file_name",
         required=True,
-        help="Certificate file name to update (without extension)"
+        help="Certificate file name to update (without extension)",
     )
     parser_staging_update.add_argument(
         "--ssl-cert",
         dest="ssl_cert",
-        help="Path to new SSL certificate file (.crt) for renewal"
+        help="Path to new SSL certificate file (.crt) for renewal",
     )
     parser_staging_update.add_argument(
         "--ssl-key",
         dest="ssl_key",
-        help="Path to new SSL private key file (.key) for renewal"
+        help="Path to new SSL private key file (.key) for renewal",
     )
     parser_staging_update.add_argument(
         "--ssl-key-password",
         dest="ssl_key_password",
-        help="Password for new encrypted key file"
+        help="Password for new encrypted key file",
     )
     parser_staging_update.add_argument(
         "--add-domain-list",
         dest="add_domain_list",
-        help="Comma-separated list of domains to add"
+        help="Comma-separated list of domains to add",
     )
     parser_staging_update.add_argument(
         "--del-domain-list",
         dest="del_domain_list",
-        help="Comma-separated list of domains to remove"
+        help="Comma-separated list of domains to remove",
     )
-    parser_staging_update.add_argument(
-        "--memo",
-        help="Memo for the update"
-    )
+    parser_staging_update.add_argument("--memo", help="Memo for the update")
     parser_staging_update.set_defaults(func=staging_update)
 
     # --- deploy command ---
     parser_deploy = subparsers.add_parser(
         "deploy",
         help="Finalize deployment of a staged SSL certificate",
-        parents=[auth_parser]
+        parents=[auth_parser],
     )
     parser_deploy.add_argument(
         "--ssl-file-name",
         dest="ssl_file_name",
         required=True,
-        help="Certificate file name to deploy (without extension)"
+        help="Certificate file name to deploy (without extension)",
     )
     parser_deploy.set_defaults(func=deploy)
 
@@ -583,13 +681,13 @@ Examples:
     parser_staging_cancel = subparsers.add_parser(
         "staging-cancel",
         help="Cancel a staged SSL certificate deployment",
-        parents=[auth_parser]
+        parents=[auth_parser],
     )
     parser_staging_cancel.add_argument(
         "--ssl-file-name",
         dest="ssl_file_name",
         required=True,
-        help="Certificate file name to cancel (without extension)"
+        help="Certificate file name to cancel (without extension)",
     )
     parser_staging_cancel.set_defaults(func=staging_cancel)
 
@@ -597,13 +695,13 @@ Examples:
     parser_history = subparsers.add_parser(
         "history",
         help="Retrieve SSL certificate deployment history",
-        parents=[auth_parser]
+        parents=[auth_parser],
     )
     parser_history.add_argument(
         "--ssl-file-name",
         dest="ssl_file_name",
         required=True,
-        help="Certificate file name to check (without extension)"
+        help="Certificate file name to check (without extension)",
     )
     parser_history.set_defaults(func=history)
 
@@ -611,25 +709,38 @@ Examples:
     parser_lookup = subparsers.add_parser(
         "lookup",
         help="Lookup SSL certificate info with staging verification",
-        parents=[auth_parser]
+        parents=[auth_parser],
     )
     parser_lookup.add_argument(
         "--ssl-file-name",
         dest="ssl_file_name",
         required=True,
-        help="Certificate file name to lookup (without extension)"
+        help="Certificate file name to lookup (without extension)",
     )
     parser_lookup.add_argument(
         "--verify",
         action="store_true",
-        help="Perform SSL certificate verification via openssl"
+        help="Perform SSL certificate verification via openssl",
     )
     parser_lookup.set_defaults(func=lookup)
+
+    # --- list command ---
+    parser_list = subparsers.add_parser(
+        "list",
+        help="List all SSL certificates registered on the ONS CDN platform",
+        parents=[auth_parser],
+    )
+    parser_list.add_argument(
+        "--domain",
+        help="Filter results to certificates whose domain_list contains this substring",
+    )
+    parser_list.set_defaults(func=list_certs)
 
     return parser
 
 
 # --- Main Execution ---
+
 
 def main() -> None:
     """Main entry point."""

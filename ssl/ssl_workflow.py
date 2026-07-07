@@ -28,7 +28,7 @@ from cert_discovery import CertDiscoveryError, get_cert_bundle, resolve_cert_dir
 # API key must come from the environment (never hardcode: public repository)
 DEFAULT_AUTH = {
     "id": os.environ.get("ONS_API_ID", "cdnetworks"),
-    "api_key": os.environ.get("ONS_API_KEY", "")
+    "api_key": os.environ.get("ONS_API_KEY", ""),
 }
 
 SCRIPT_DIR = Path(__file__).parent
@@ -36,6 +36,7 @@ MANAGER_SCRIPT = SCRIPT_DIR / "ssl_api_manager.py"
 
 
 # --- Helper Functions ---
+
 
 def print_step(step_num: int, total: int, message: str) -> None:
     """Print a workflow step."""
@@ -75,7 +76,11 @@ def _parse_expiry_date(not_after: str) -> Optional[int]:
     for fmt in date_formats:
         try:
             expiry_date = datetime.strptime(not_after, fmt)
-            now = datetime.now(expiry_date.tzinfo) if expiry_date.tzinfo else datetime.now()
+            now = (
+                datetime.now(expiry_date.tzinfo)
+                if expiry_date.tzinfo
+                else datetime.now()
+            )
             return (expiry_date - now).days
         except ValueError:
             continue
@@ -99,17 +104,28 @@ def _warn_cert_expiry(raw: str) -> None:
 
 # --- Certificate Verification Functions ---
 
+
 def verify_certificate_expiry(cert_path: str) -> dict:
     """Verify certificate expiration and return details."""
     try:
         cmd = [
-            "openssl", "x509", "-in", cert_path, "-noout",
-            "-dates", "-subject", "-issuer", "-serial"
+            "openssl",
+            "x509",
+            "-in",
+            cert_path,
+            "-noout",
+            "-dates",
+            "-subject",
+            "-issuer",
+            "-serial",
         ]
         result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
 
         if result.returncode != 0:
-            return {"valid": False, "error": f"Failed to parse certificate: {result.stderr}"}
+            return {
+                "valid": False,
+                "error": f"Failed to parse certificate: {result.stderr}",
+            }
 
         lines = result.stdout.strip().split("\n")
         cert_info = {}
@@ -145,7 +161,7 @@ def verify_certificate_expiry(cert_path: str) -> dict:
             "notBefore": cert_info.get("notBefore", "N/A"),
             "notAfter": cert_info.get("notAfter", "N/A"),
             "days_left": days_left,
-            "status": status
+            "status": status,
         }
 
     except subprocess.TimeoutExpired:
@@ -182,7 +198,9 @@ def verify_key_cert_match(cert_path: str, key_path: str) -> bool:
     try:
         # Get certificate modulus
         cert_cmd = ["openssl", "x509", "-in", cert_path, "-modulus", "-noout"]
-        cert_result = subprocess.run(cert_cmd, capture_output=True, text=True, timeout=10)
+        cert_result = subprocess.run(
+            cert_cmd, capture_output=True, text=True, timeout=10
+        )
 
         # Get key modulus
         key_cmd = ["openssl", "rsa", "-in", key_path, "-modulus", "-noout"]
@@ -196,7 +214,9 @@ def verify_key_cert_match(cert_path: str, key_path: str) -> bool:
         return False
 
 
-def validate_certificate_files(cert_dir: str, domain: str = None, key_password: str = None) -> dict:
+def validate_certificate_files(
+    cert_dir: str, domain: str = None, key_password: str = None
+) -> dict:
     """
     Validate certificate files in a directory, auto-detecting vendor
     filenames via cert_discovery.
@@ -223,19 +243,31 @@ def validate_certificate_files(cert_dir: str, domain: str = None, key_password: 
     cert_info = verify_certificate_expiry(str(cert_path))
     if not cert_info.get("valid"):
         errors.append(f"Certificate validation failed: {cert_info.get('error')}")
-        return {"valid": False, "errors": errors, "warnings": warnings, "cert_info": cert_info}
+        return {
+            "valid": False,
+            "errors": errors,
+            "warnings": warnings,
+            "cert_info": cert_info,
+        }
 
     # Check expiration
     if cert_info["status"] == "expired":
         errors.append(f"Certificate is EXPIRED! Expired on {cert_info['notAfter']}")
     elif cert_info["status"] == "expiring_soon":
-        warnings.append(f"Certificate expires in {cert_info['days_left']} days ({cert_info['notAfter']})")
+        warnings.append(
+            f"Certificate expires in {cert_info['days_left']} days ({cert_info['notAfter']})"
+        )
 
     # Verify private key
     key_info = verify_private_key(str(key_path))
     if not key_info.get("valid"):
         errors.append(f"Private key validation failed: {key_info.get('error')}")
-        return {"valid": False, "errors": errors, "warnings": warnings, "cert_info": cert_info}
+        return {
+            "valid": False,
+            "errors": errors,
+            "warnings": warnings,
+            "cert_info": cert_info,
+        }
 
     # Check key-certificate match
     if not verify_key_cert_match(str(cert_path), str(key_path)):
@@ -246,19 +278,27 @@ def validate_certificate_files(cert_dir: str, domain: str = None, key_password: 
     # Verify certificate chain
     chain_info = verify_certificate_chain(str(fullchain_path))
     if chain_info.get("valid"):
-        print_success(f"Certificate chain verified ({len(chain_info.get('chain', []))} certificates)")
+        print_success(
+            f"Certificate chain verified ({len(chain_info.get('chain', []))} certificates)"
+        )
     else:
-        errors.append(f"Certificate chain verification failed: {chain_info.get('error', 'Unknown error')}")
+        errors.append(
+            f"Certificate chain verification failed: {chain_info.get('error', 'Unknown error')}"
+        )
 
     # Check domain match if provided
     if domain and cert_info.get("subject"):
         if domain.lower() not in cert_info["subject"].lower():
             san_check = subprocess.run(
                 ["openssl", "x509", "-in", str(fullchain_path), "-noout", "-text"],
-                capture_output=True, text=True, timeout=10
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if domain.lower() not in san_check.stdout.lower():
-                warnings.append(f"Domain '{domain}' not found in certificate Subject or SAN")
+                warnings.append(
+                    f"Domain '{domain}' not found in certificate Subject or SAN"
+                )
 
     return {
         "valid": len(errors) == 0,
@@ -269,7 +309,9 @@ def validate_certificate_files(cert_dir: str, domain: str = None, key_password: 
     }
 
 
-def verify_certificate_chain(fullchain_path: str, trusted_ca_file: Optional[str] = None) -> dict:
+def verify_certificate_chain(
+    fullchain_path: str, trusted_ca_file: Optional[str] = None
+) -> dict:
     """
     Verify the full certificate chain using OpenSSL.
 
@@ -287,10 +329,15 @@ def verify_certificate_chain(fullchain_path: str, trusted_ca_file: Optional[str]
     try:
         pem_blocks = re.findall(
             r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
-            Path(fullchain_path).read_text(), re.DOTALL,
+            Path(fullchain_path).read_text(),
+            re.DOTALL,
         )
         if not pem_blocks:
-            return {"valid": False, "chain": [], "error": "No certificates found in fullchain"}
+            return {
+                "valid": False,
+                "chain": [],
+                "error": "No certificates found in fullchain",
+            }
 
         # Extract subject/issuer pairs for display purposes.
         chain_cmd = f"""
@@ -345,11 +392,13 @@ def verify_certificate_chain(fullchain_path: str, trusted_ca_file: Optional[str]
         return {"valid": False, "error": str(e)}
 
 
-def print_certificate_info(cert_info: dict, key_info: dict = None, chain_info: dict = None) -> None:
+def print_certificate_info(
+    cert_info: dict, key_info: dict = None, chain_info: dict = None
+) -> None:
     """Print formatted certificate information."""
-    print(f"\n{'='*60}")
+    print(f"\n{'=' * 60}")
     print("Certificate Information")
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
     print(f"  Subject: {cert_info.get('subject', 'N/A')}")
     print(f"  Issuer: {cert_info.get('issuer', 'N/A')}")
     print(f"  Serial: {cert_info.get('serial', 'N/A')}")
@@ -359,20 +408,20 @@ def print_certificate_info(cert_info: dict, key_info: dict = None, chain_info: d
     days_left = cert_info.get("days_left")
     if days_left is not None:
         if days_left < 0:
-            print(f"  Status: \033[91m[EXPIRED]\033[0m")
+            print("  Status: \033[91m[EXPIRED]\033[0m")
         elif days_left <= 30:
             print(f"  Status: \033[93m[EXPIRES IN {days_left} DAYS]\033[0m")
         else:
             print(f"  Status: \033[92m[VALID - {days_left} days]\033[0m")
 
     if key_info:
-        print(f"\nPrivate Key: \033[92mOK\033[0m")
+        print("\nPrivate Key: \033[92mOK\033[0m")
 
     # Print certificate chain info
     if chain_info:
-        print(f"\nCertificate Chain Verification:")
+        print("\nCertificate Chain Verification:")
         if chain_info.get("valid"):
-            print(f"  Chain Status: \033[92mOK\033[0m")
+            print("  Chain Status: \033[92mOK\033[0m")
             if chain_info.get("chain"):
                 chain = chain_info["chain"]
                 print(f"  Chain ({len(chain)} certificates):")
@@ -381,11 +430,11 @@ def print_certificate_info(cert_info: dict, key_info: dict = None, chain_info: d
                     cn = extract_cn(subject)
                     print(f"    {i}. {cn}")
         else:
-            print(f"  Chain Status: \033[91mFAILED\033[0m")
+            print("  Chain Status: \033[91mFAILED\033[0m")
             if chain_info.get("error"):
                 print(f"    Error: {chain_info['error']}")
 
-    print(f"{'='*60}")
+    print(f"{'=' * 60}")
 
 
 def run_manager_command(command: list) -> dict:
@@ -408,12 +457,11 @@ def get_auth_params(id: str = None, api_key: str = None) -> dict:
     """Get authentication parameters."""
     key = api_key or DEFAULT_AUTH["api_key"]
     if not key:
-        print_error("API key not set. Set the ONS_API_KEY environment variable or pass --api-key.")
+        print_error(
+            "API key not set. Set the ONS_API_KEY environment variable or pass --api-key."
+        )
         sys.exit(1)
-    return {
-        "id": id or DEFAULT_AUTH["id"],
-        "api_key": key
-    }
+    return {"id": id or DEFAULT_AUTH["id"], "api_key": key}
 
 
 def lookup_cert(ssl_file_name: str, auth: dict, verify: bool = False) -> dict:
@@ -437,14 +485,11 @@ def lookup_cert(ssl_file_name: str, auth: dict, verify: bool = False) -> dict:
                     staging_ip = parts[1].strip()
                     break
 
-    return {
-        "found": True,
-        "staging_ip": staging_ip,
-        "raw": result.get("raw", "")
-    }
+    return {"found": True, "staging_ip": staging_ip, "raw": result.get("raw", "")}
 
 
 # --- Workflow Functions ---
+
 
 def workflow_new_cert(
     ssl_file_name: str,
@@ -454,7 +499,7 @@ def workflow_new_cert(
     memo: str = None,
     auth: dict = None,
     skip_verify: bool = False,
-    auto_deploy: bool = True
+    auto_deploy: bool = True,
 ) -> dict:
     """
     Workflow for new certificate registration.
@@ -470,7 +515,14 @@ def workflow_new_cert(
     # Step 1: Staging Deploy
     print_step(1, steps, f"Deploying new certificate to staging: {ssl_file_name}")
 
-    cmd = ["staging-deploy", *_auth_args(auth), "--ssl-cert", ssl_cert, "--ssl-key", ssl_key]
+    cmd = [
+        "staging-deploy",
+        *_auth_args(auth),
+        "--ssl-cert",
+        ssl_cert,
+        "--ssl-key",
+        ssl_key,
+    ]
     if domain_list:
         cmd.extend(["--domain-list", domain_list])
     if memo:
@@ -485,14 +537,14 @@ def workflow_new_cert(
         print_error(f"API error: {api_resp.get('result_msg', 'Unknown')}")
         return {"success": False, "step": 1, "error": api_resp}
 
-    print_success(f"Staging deployment successful")
+    print_success("Staging deployment successful")
     ssl_file_name = api_resp.get("data", {}).get("ssl_file_name", ssl_file_name)
 
     # Step 2: Verify
     if skip_verify:
         print_step(2, steps, "Skipping verification")
     else:
-        print_step(2, steps, f"Verifying certificate on staging")
+        print_step(2, steps, "Verifying certificate on staging")
 
         lookup_result = lookup_cert(ssl_file_name, auth, verify=True)
         if not lookup_result["found"]:
@@ -505,7 +557,9 @@ def workflow_new_cert(
     if auto_deploy:
         print_step(3, steps, f"Finalizing deployment: {ssl_file_name}")
 
-        result = run_manager_command(["deploy", *_auth_args(auth), "--ssl-file-name", ssl_file_name])
+        result = run_manager_command(
+            ["deploy", *_auth_args(auth), "--ssl-file-name", ssl_file_name]
+        )
         if not result["success"]:
             return {"success": False, "step": 3}
 
@@ -521,7 +575,7 @@ def workflow_new_cert(
     return {
         "success": True,
         "ssl_file_name": ssl_file_name,
-        "staging_ip": lookup_result.get("staging_ip") if not skip_verify else None
+        "staging_ip": lookup_result.get("staging_ip") if not skip_verify else None,
     }
 
 
@@ -532,7 +586,7 @@ def workflow_renew_cert(
     memo: str = None,
     auth: dict = None,
     skip_verify: bool = False,
-    auto_deploy: bool = True
+    auto_deploy: bool = True,
 ) -> dict:
     """
     Workflow for existing certificate renewal.
@@ -548,8 +602,16 @@ def workflow_renew_cert(
     # Step 1: Staging Update
     print_step(1, steps, f"Updating certificate on staging: {ssl_file_name}")
 
-    cmd = ["staging-update", *_auth_args(auth), "--ssl-file-name", ssl_file_name,
-           "--ssl-cert", ssl_cert, "--ssl-key", ssl_key]
+    cmd = [
+        "staging-update",
+        *_auth_args(auth),
+        "--ssl-file-name",
+        ssl_file_name,
+        "--ssl-cert",
+        ssl_cert,
+        "--ssl-key",
+        ssl_key,
+    ]
     if memo:
         cmd.extend(["--memo", memo])
 
@@ -562,13 +624,13 @@ def workflow_renew_cert(
         print_error(f"API error: {api_resp.get('result_msg', 'Unknown')}")
         return {"success": False, "step": 1, "error": api_resp}
 
-    print_success(f"Staging update successful")
+    print_success("Staging update successful")
 
     # Step 2: Verify
     if skip_verify:
         print_step(2, steps, "Skipping verification")
     else:
-        print_step(2, steps, f"Verifying certificate on staging")
+        print_step(2, steps, "Verifying certificate on staging")
 
         lookup_result = lookup_cert(ssl_file_name, auth, verify=True)
         if not lookup_result["found"]:
@@ -581,7 +643,9 @@ def workflow_renew_cert(
     if auto_deploy:
         print_step(3, steps, f"Finalizing deployment: {ssl_file_name}")
 
-        result = run_manager_command(["deploy", *_auth_args(auth), "--ssl-file-name", ssl_file_name])
+        result = run_manager_command(
+            ["deploy", *_auth_args(auth), "--ssl-file-name", ssl_file_name]
+        )
         if not result["success"]:
             return {"success": False, "step": 3}
 
@@ -597,7 +661,7 @@ def workflow_renew_cert(
     return {
         "success": True,
         "ssl_file_name": ssl_file_name,
-        "staging_ip": lookup_result.get("staging_ip") if not skip_verify else None
+        "staging_ip": lookup_result.get("staging_ip") if not skip_verify else None,
     }
 
 
@@ -610,7 +674,7 @@ def workflow_domain_update(
     memo: str = None,
     auth: dict = None,
     skip_verify: bool = False,
-    auto_deploy: bool = True
+    auto_deploy: bool = True,
 ) -> dict:
     """
     Workflow for domain mapping changes.
@@ -624,11 +688,17 @@ def workflow_domain_update(
     steps = 3 if auto_deploy else 2
 
     if not add_domain_list and not del_domain_list and not ssl_cert:
-        print_error("Must specify at least one of: add-domain-list, del-domain-list, ssl-cert")
+        print_error(
+            "Must specify at least one of: add-domain-list, del-domain-list, ssl-cert"
+        )
         return {"success": False}
 
     # Step 1: Staging Update
-    action = "Updating domains" if (add_domain_list or del_domain_list) else "Updating certificate"
+    action = (
+        "Updating domains"
+        if (add_domain_list or del_domain_list)
+        else "Updating certificate"
+    )
     print_step(1, steps, f"{action} on staging: {ssl_file_name}")
 
     cmd = ["staging-update", *_auth_args(auth), "--ssl-file-name", ssl_file_name]
@@ -652,13 +722,13 @@ def workflow_domain_update(
         print_error(f"API error: {api_resp.get('result_msg', 'Unknown')}")
         return {"success": False, "step": 1, "error": api_resp}
 
-    print_success(f"Staging update successful")
+    print_success("Staging update successful")
 
     # Step 2: Verify
     if skip_verify:
         print_step(2, steps, "Skipping verification")
     else:
-        print_step(2, steps, f"Verifying changes on staging")
+        print_step(2, steps, "Verifying changes on staging")
 
         lookup_result = lookup_cert(ssl_file_name, auth, verify=True)
         if not lookup_result["found"]:
@@ -669,7 +739,9 @@ def workflow_domain_update(
     if auto_deploy:
         print_step(3, steps, f"Finalizing deployment: {ssl_file_name}")
 
-        result = run_manager_command(["deploy", *_auth_args(auth), "--ssl-file-name", ssl_file_name])
+        result = run_manager_command(
+            ["deploy", *_auth_args(auth), "--ssl-file-name", ssl_file_name]
+        )
         if not result["success"]:
             return {"success": False, "step": 3}
 
@@ -682,16 +754,11 @@ def workflow_domain_update(
     else:
         print_warning("Auto-deploy skipped. Run 'deploy' command manually when ready.")
 
-    return {
-        "success": True,
-        "ssl_file_name": ssl_file_name
-    }
+    return {"success": True, "ssl_file_name": ssl_file_name}
 
 
 def workflow_lookup(
-    ssl_file_name: str,
-    auth: dict = None,
-    verify: bool = False
+    ssl_file_name: str, auth: dict = None, verify: bool = False
 ) -> dict:
     """
     Lookup certificate information.
@@ -708,16 +775,39 @@ def workflow_lookup(
     if result.get("raw"):
         print(result["raw"])
 
-    return {
-        "success": result["found"],
-        "staging_ip": result.get("staging_ip")
-    }
+    return {"success": result["found"], "staging_ip": result.get("staging_ip")}
+
+
+def workflow_list(domain: str = None, auth: dict = None) -> dict:
+    """
+    List all SSL certificates registered on the ONS CDN platform.
+
+    Step:
+        1. list [--domain]
+    """
+    auth = auth or get_auth_params()
+
+    print_step(
+        1,
+        1,
+        "Listing registered SSL certificates"
+        + (f" (domain filter: {domain})" if domain else ""),
+    )
+
+    cmd = ["list", *_auth_args(auth)]
+    if domain:
+        cmd.extend(["--domain", domain])
+
+    result = run_manager_command(cmd)
+
+    if result.get("raw"):
+        print(result["raw"])
+
+    return {"success": result["success"]}
 
 
 def workflow_validate(
-    cert_dir: str,
-    domain: str = None,
-    key_password: str = None
+    cert_dir: str, domain: str = None, key_password: str = None
 ) -> dict:
     """
     Validate SSL certificate files locally.
@@ -737,8 +827,7 @@ def workflow_validate(
     # Print certificate info
     if validation.get("cert_info"):
         print_certificate_info(
-            validation["cert_info"],
-            chain_info=validation.get("chain_info")
+            validation["cert_info"], chain_info=validation.get("chain_info")
         )
 
     # Print errors
@@ -776,7 +865,14 @@ def get_ons_cdn_cert_info(ssl_file_name: str, auth: dict) -> dict:
         - days_left: int or None
     """
     # Step 1: Get staging IP from history API
-    cmd = ["python3", str(MANAGER_SCRIPT), "history", *_auth_args(auth), "--ssl-file-name", ssl_file_name]
+    cmd = [
+        "python3",
+        str(MANAGER_SCRIPT),
+        "history",
+        *_auth_args(auth),
+        "--ssl-file-name",
+        ssl_file_name,
+    ]
 
     result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
 
@@ -787,7 +883,10 @@ def get_ons_cdn_cert_info(ssl_file_name: str, auth: dict) -> dict:
         data = json.loads(result.stdout)
         api_resp = data.get("api_response", {})
         if api_resp.get("result_code") != "200":
-            return {"success": False, "error": f"API error: {api_resp.get('result_msg')}"}
+            return {
+                "success": False,
+                "error": f"API error: {api_resp.get('result_msg')}",
+            }
 
         history_data = api_resp.get("data", {})
         staging_history = history_data.get("staging_history", [])
@@ -813,31 +912,38 @@ def get_ons_cdn_cert_info(ssl_file_name: str, auth: dict) -> dict:
             return {"success": False, "error": "No deployment history found"}
 
         # Step 2: Connect to staging server and get certificate info using pipe
-        primary_domain = cname.split(".58.wskam.com")[0] if ".58.wskam.com" in cname else ssl_file_name
+        primary_domain = (
+            cname.split(".58.wskam.com")[0]
+            if ".58.wskam.com" in cname
+            else ssl_file_name
+        )
 
         # If we don't have staging IP, try to resolve the domain
         if not staging_ip:
-            print_warning("Staging IP not found in history, attempting DNS resolution...")
+            print_warning(
+                "Staging IP not found in history, attempting DNS resolution..."
+            )
             try:
                 resolved_ip = socket.gethostbyname(service_domain)
                 staging_ip = resolved_ip
                 print_success(f"Resolved {service_domain} -> {staging_ip}")
             except socket.gaierror:
-                return {"success": False, "error": f"Could not resolve domain: {service_domain}"}
-
+                return {
+                    "success": False,
+                    "error": f"Could not resolve domain: {service_domain}",
+                }
 
         # Use shell pipe to get certificate directly
-        shell_cmd = f'openssl s_client -connect {staging_ip}:443 -servername {primary_domain} </dev/null 2>/dev/null | openssl x509 -noout -serial -subject -issuer -dates'
+        shell_cmd = f"openssl s_client -connect {staging_ip}:443 -servername {primary_domain} </dev/null 2>/dev/null | openssl x509 -noout -serial -subject -issuer -dates"
         cert_result = subprocess.run(
-            shell_cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=15
+            shell_cmd, shell=True, capture_output=True, text=True, timeout=15
         )
 
         if cert_result.returncode != 0:
-            return {"success": False, "error": f"Failed to get certificate from {staging_ip}: {cert_result.stderr}"}
+            return {
+                "success": False,
+                "error": f"Failed to get certificate from {staging_ip}: {cert_result.stderr}",
+            }
 
         # Parse certificate info
         serial = None
@@ -872,7 +978,7 @@ def get_ons_cdn_cert_info(ssl_file_name: str, auth: dict) -> dict:
             "issuer": issuer,
             "not_before": not_before,
             "not_after": not_after,
-            "days_left": days_left
+            "days_left": days_left,
         }
 
     except json.JSONDecodeError:
@@ -881,15 +987,11 @@ def get_ons_cdn_cert_info(ssl_file_name: str, auth: dict) -> dict:
         return {"success": False, "error": str(e)}
 
 
-def print_comparison(
-    local_info: dict,
-    ons_info: dict,
-    domain: str = None
-) -> None:
+def print_comparison(local_info: dict, ons_info: dict, domain: str = None) -> None:
     """Print comparison table between local and ONS CDN certificate."""
-    print(f"\n{'='*80}")
+    print(f"\n{'=' * 80}")
     print("Certificate Comparison: Local vs ONS CDN")
-    print(f"{'='*80}")
+    print(f"{'=' * 80}")
 
     def status_icon(matches: bool) -> str:
         return "\033[92m✓\033[0m" if matches else "\033[91m✗\033[0m"
@@ -902,7 +1004,9 @@ def print_comparison(
     local_serial = local_info.get("serial", "N/A")
     ons_serial = ons_info.get("serial", "N/A")
     serial_match = local_serial == ons_serial
-    print(f"{'Serial':<20} {local_serial:<35} {ons_serial:<35} {status_icon(serial_match):<8}")
+    print(
+        f"{'Serial':<20} {local_serial:<35} {ons_serial:<35} {status_icon(serial_match):<8}"
+    )
 
     # Subject/CN
     local_cn = extract_cn(local_info.get("subject", ""))
@@ -914,14 +1018,18 @@ def print_comparison(
     local_expiry = local_info.get("notAfter", "N/A")
     ons_expiry = ons_info.get("not_after", ons_info.get("notAfter", "N/A"))
     expiry_match = local_expiry == ons_expiry
-    print(f"{'만료일':<20} {local_expiry:<35} {ons_expiry:<35} {status_icon(expiry_match):<8}")
+    print(
+        f"{'만료일':<20} {local_expiry:<35} {ons_expiry:<35} {status_icon(expiry_match):<8}"
+    )
 
     # Days Left
     local_days = local_info.get("days_left", "N/A")
     ons_days = ons_info.get("days_left", "N/A")
     if isinstance(local_days, int) and isinstance(ons_days, int):
         days_match = local_days == ons_days
-        print(f"{'남은 일수':<20} {f'{local_days}일':<35} {f'{ons_days}일':<35} {status_icon(days_match):<8}")
+        print(
+            f"{'남은 일수':<20} {f'{local_days}일':<35} {f'{ons_days}일':<35} {status_icon(days_match):<8}"
+        )
     else:
         print(f"{'남은 일수':<20} {str(local_days):<35} {str(ons_days):<35} {'N/A':<8}")
 
@@ -929,16 +1037,20 @@ def print_comparison(
     local_issuer = extract_cn(local_info.get("issuer", ""))
     ons_issuer = extract_cn(ons_info.get("issuer", ""))
     issuer_match = local_issuer == ons_issuer
-    print(f"{'Issuer':<20} {local_issuer:<35} {ons_issuer:<35} {status_icon(issuer_match):<8}")
+    print(
+        f"{'Issuer':<20} {local_issuer:<35} {ons_issuer:<35} {status_icon(issuer_match):<8}"
+    )
 
     print("=" * 100)
 
     # Overall result
     all_match = serial_match and cn_match and expiry_match and issuer_match
     if all_match:
-        print(f"\n\033[92m결과: 로컬과 ONS CDN 인증서가 동일합니다 (업로드 불필요)\033[0m")
+        print(
+            "\n\033[92m결과: 로컬과 ONS CDN 인증서가 동일합니다 (업로드 불필요)\033[0m"
+        )
     else:
-        print(f"\n\033[91m결과: 인증서가 다릅니다 (업로드 필요)\033[0m")
+        print("\n\033[91m결과: 인증서가 다릅니다 (업로드 필요)\033[0m")
 
 
 def workflow_compare(
@@ -946,7 +1058,7 @@ def workflow_compare(
     ssl_file_name: str,
     domain: str = None,
     auth: dict = None,
-    key_password: str = None
+    key_password: str = None,
 ) -> dict:
     """
     Compare local certificate with ONS CDN deployed certificate.
@@ -974,7 +1086,9 @@ def workflow_compare(
         print_error("로컬 인증서가 만료되었습니다!")
         return {"success": False, "step": 1, "reason": "local_cert_expired"}
 
-    print_success(f"로컬 인증서 유효함 (만료일: {local_cert_info.get('notAfter', 'N/A')})")
+    print_success(
+        f"로컬 인증서 유효함 (만료일: {local_cert_info.get('notAfter', 'N/A')})"
+    )
 
     # Step 2: Get ONS CDN certificate info
     print_step(2, 3, f"ONS CDN 인증서 조회: {ssl_file_name}")
@@ -983,9 +1097,11 @@ def workflow_compare(
 
     if not ons_info.get("success"):
         print_error(f"ONS CDN 인증서 조회 실패: {ons_info.get('error')}")
-        return {"success": False, "step": 2, "reason": ons_info.get('error')}
+        return {"success": False, "step": 2, "reason": ons_info.get("error")}
 
-    print_success(f"ONS CDN 인증서 조회 성공 (Staging IP: {ons_info.get('staging_ip')})")
+    print_success(
+        f"ONS CDN 인증서 조회 성공 (Staging IP: {ons_info.get('staging_ip')})"
+    )
 
     # Step 3: Compare
     print_step(3, 3, "비교 결과")
@@ -1002,7 +1118,7 @@ def workflow_compare(
             "match": True,
             "ssl_file_name": ssl_file_name,
             "local_serial": local_serial,
-            "ons_serial": ons_serial
+            "ons_serial": ons_serial,
         }
     else:
         return {
@@ -1010,11 +1126,12 @@ def workflow_compare(
             "match": False,
             "ssl_file_name": ssl_file_name,
             "local_serial": local_serial,
-            "ons_serial": ons_serial
+            "ons_serial": ons_serial,
         }
 
 
 # --- CLI Resolution Helpers ---
+
 
 def _resolve_validate_cert_dir(args) -> str:
     """Resolve the cert directory for validate/compare from --cert-dir or --domain."""
@@ -1040,7 +1157,9 @@ def _resolve_cert_key_args(args, required: bool = True):
     if args.ssl_cert and args.ssl_key:
         return args.ssl_cert, args.ssl_key
     if args.ssl_cert or args.ssl_key:
-        print_error("Provide both --ssl-cert and --ssl-key together, or use --domain for auto-detection.")
+        print_error(
+            "Provide both --ssl-cert and --ssl-key together, or use --domain for auto-detection."
+        )
         sys.exit(1)
 
     domain = getattr(args, "domain", None)
@@ -1052,7 +1171,9 @@ def _resolve_cert_key_args(args, required: bool = True):
 
     try:
         cert_dir = resolve_cert_dir(domain)
-        password = getattr(args, "ssl_key_password", None) or os.environ.get("ONS_SSL_KEY_PASSWORD")
+        password = getattr(args, "ssl_key_password", None) or os.environ.get(
+            "ONS_SSL_KEY_PASSWORD"
+        )
         bundle = get_cert_bundle(cert_dir, password)
     except CertDiscoveryError as e:
         print_error(str(e))
@@ -1062,6 +1183,7 @@ def _resolve_cert_key_args(args, required: bool = True):
 
 
 # --- Argument Parser ---
+
 
 def create_parser() -> argparse.ArgumentParser:
     """Create and configure the argument parser."""
@@ -1081,13 +1203,14 @@ Examples:
 
   # Lookup certificate info with verification
   %(prog)s lookup --ssl-file-name example.com --verify
-        """
+
+  # Find the ssl-file-name registered for a domain
+  %(prog)s list --domain example.com
+        """,
     )
 
     subparsers = parser.add_subparsers(
-        dest="command",
-        required=True,
-        help="Available commands"
+        dest="command", required=True, help="Available commands"
     )
 
     # Common auth arguments
@@ -1097,27 +1220,46 @@ Examples:
 
     # --- new command ---
     parser_new = subparsers.add_parser(
-        "new",
-        help="Register a new SSL certificate",
-        parents=[auth_parser]
+        "new", help="Register a new SSL certificate", parents=[auth_parser]
     )
-    parser_new.add_argument("--ssl-file-name", dest="ssl_file_name", required=True,
-                            help="Certificate file name (without extension)")
-    parser_new.add_argument("--ssl-cert", dest="ssl_cert",
-                            help="Path to SSL certificate file (fullchain)")
-    parser_new.add_argument("--ssl-key", dest="ssl_key",
-                            help="Path to SSL private key file")
-    parser_new.add_argument("--domain", dest="domain",
-                            help="Domain to auto-locate under ~/Certificate/ instead of --ssl-cert/--ssl-key")
-    parser_new.add_argument("--ssl-key-password", dest="ssl_key_password",
-                            help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)")
-    parser_new.add_argument("--domain-list", dest="domain_list",
-                            help="Comma-separated list of domains")
+    parser_new.add_argument(
+        "--ssl-file-name",
+        dest="ssl_file_name",
+        required=True,
+        help="Certificate file name (without extension)",
+    )
+    parser_new.add_argument(
+        "--ssl-cert", dest="ssl_cert", help="Path to SSL certificate file (fullchain)"
+    )
+    parser_new.add_argument(
+        "--ssl-key", dest="ssl_key", help="Path to SSL private key file"
+    )
+    parser_new.add_argument(
+        "--domain",
+        dest="domain",
+        help="Domain to auto-locate under ~/Certificate/ instead of --ssl-cert/--ssl-key",
+    )
+    parser_new.add_argument(
+        "--ssl-key-password",
+        dest="ssl_key_password",
+        help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)",
+    )
+    parser_new.add_argument(
+        "--domain-list", dest="domain_list", help="Comma-separated list of domains"
+    )
     parser_new.add_argument("--memo", help="Memo for the deployment")
-    parser_new.add_argument("--skip-verify", dest="skip_verify", action="store_true",
-                            help="Skip verification step")
-    parser_new.add_argument("--no-auto-deploy", dest="no_auto_deploy", action="store_true",
-                            help="Skip automatic final deployment")
+    parser_new.add_argument(
+        "--skip-verify",
+        dest="skip_verify",
+        action="store_true",
+        help="Skip verification step",
+    )
+    parser_new.add_argument(
+        "--no-auto-deploy",
+        dest="no_auto_deploy",
+        action="store_true",
+        help="Skip automatic final deployment",
+    )
 
     def _run_new(args):
         ssl_cert, ssl_key = _resolve_cert_key_args(args)
@@ -1129,32 +1271,50 @@ Examples:
             memo=args.memo,
             auth=get_auth_params(args.id, args.api_key),
             skip_verify=args.skip_verify,
-            auto_deploy=not args.no_auto_deploy
+            auto_deploy=not args.no_auto_deploy,
         )
 
     parser_new.set_defaults(func=_run_new)
 
     # --- renew command ---
     parser_renew = subparsers.add_parser(
-        "renew",
-        help="Renew an existing SSL certificate",
-        parents=[auth_parser]
+        "renew", help="Renew an existing SSL certificate", parents=[auth_parser]
     )
-    parser_renew.add_argument("--ssl-file-name", dest="ssl_file_name", required=True,
-                              help="Certificate file name (without extension)")
-    parser_renew.add_argument("--ssl-cert", dest="ssl_cert",
-                              help="Path to new SSL certificate file")
-    parser_renew.add_argument("--ssl-key", dest="ssl_key",
-                              help="Path to new SSL private key file")
-    parser_renew.add_argument("--domain", dest="domain",
-                              help="Domain to auto-locate under ~/Certificate/ instead of --ssl-cert/--ssl-key")
-    parser_renew.add_argument("--ssl-key-password", dest="ssl_key_password",
-                              help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)")
+    parser_renew.add_argument(
+        "--ssl-file-name",
+        dest="ssl_file_name",
+        required=True,
+        help="Certificate file name (without extension)",
+    )
+    parser_renew.add_argument(
+        "--ssl-cert", dest="ssl_cert", help="Path to new SSL certificate file"
+    )
+    parser_renew.add_argument(
+        "--ssl-key", dest="ssl_key", help="Path to new SSL private key file"
+    )
+    parser_renew.add_argument(
+        "--domain",
+        dest="domain",
+        help="Domain to auto-locate under ~/Certificate/ instead of --ssl-cert/--ssl-key",
+    )
+    parser_renew.add_argument(
+        "--ssl-key-password",
+        dest="ssl_key_password",
+        help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)",
+    )
     parser_renew.add_argument("--memo", help="Memo for the update")
-    parser_renew.add_argument("--skip-verify", dest="skip_verify", action="store_true",
-                              help="Skip verification step")
-    parser_renew.add_argument("--no-auto-deploy", dest="no_auto_deploy", action="store_true",
-                              help="Skip automatic final deployment")
+    parser_renew.add_argument(
+        "--skip-verify",
+        dest="skip_verify",
+        action="store_true",
+        help="Skip verification step",
+    )
+    parser_renew.add_argument(
+        "--no-auto-deploy",
+        dest="no_auto_deploy",
+        action="store_true",
+        help="Skip automatic final deployment",
+    )
 
     def _run_renew(args):
         ssl_cert, ssl_key = _resolve_cert_key_args(args)
@@ -1165,7 +1325,7 @@ Examples:
             memo=args.memo,
             auth=get_auth_params(args.id, args.api_key),
             skip_verify=args.skip_verify,
-            auto_deploy=not args.no_auto_deploy
+            auto_deploy=not args.no_auto_deploy,
         )
 
     parser_renew.set_defaults(func=_run_renew)
@@ -1174,27 +1334,55 @@ Examples:
     parser_domains = subparsers.add_parser(
         "domains",
         help="Update domain mappings for an existing certificate",
-        parents=[auth_parser]
+        parents=[auth_parser],
     )
-    parser_domains.add_argument("--ssl-file-name", dest="ssl_file_name", required=True,
-                               help="Certificate file name (without extension)")
-    parser_domains.add_argument("--add-domain-list", dest="add_domain_list",
-                               help="Comma-separated list of domains to add")
-    parser_domains.add_argument("--del-domain-list", dest="del_domain_list",
-                               help="Comma-separated list of domains to remove")
-    parser_domains.add_argument("--ssl-cert", dest="ssl_cert",
-                               help="Path to new SSL certificate file (optional)")
-    parser_domains.add_argument("--ssl-key", dest="ssl_key",
-                               help="Path to new SSL private key file (optional)")
-    parser_domains.add_argument("--domain", dest="domain",
-                               help="Domain to auto-locate under ~/Certificate/ for a certificate rotation (optional)")
-    parser_domains.add_argument("--ssl-key-password", dest="ssl_key_password",
-                               help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)")
+    parser_domains.add_argument(
+        "--ssl-file-name",
+        dest="ssl_file_name",
+        required=True,
+        help="Certificate file name (without extension)",
+    )
+    parser_domains.add_argument(
+        "--add-domain-list",
+        dest="add_domain_list",
+        help="Comma-separated list of domains to add",
+    )
+    parser_domains.add_argument(
+        "--del-domain-list",
+        dest="del_domain_list",
+        help="Comma-separated list of domains to remove",
+    )
+    parser_domains.add_argument(
+        "--ssl-cert",
+        dest="ssl_cert",
+        help="Path to new SSL certificate file (optional)",
+    )
+    parser_domains.add_argument(
+        "--ssl-key", dest="ssl_key", help="Path to new SSL private key file (optional)"
+    )
+    parser_domains.add_argument(
+        "--domain",
+        dest="domain",
+        help="Domain to auto-locate under ~/Certificate/ for a certificate rotation (optional)",
+    )
+    parser_domains.add_argument(
+        "--ssl-key-password",
+        dest="ssl_key_password",
+        help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)",
+    )
     parser_domains.add_argument("--memo", help="Memo for the update")
-    parser_domains.add_argument("--skip-verify", dest="skip_verify", action="store_true",
-                               help="Skip verification step")
-    parser_domains.add_argument("--no-auto-deploy", dest="no_auto_deploy", action="store_true",
-                               help="Skip automatic final deployment")
+    parser_domains.add_argument(
+        "--skip-verify",
+        dest="skip_verify",
+        action="store_true",
+        help="Skip verification step",
+    )
+    parser_domains.add_argument(
+        "--no-auto-deploy",
+        dest="no_auto_deploy",
+        action="store_true",
+        help="Skip automatic final deployment",
+    )
 
     def _run_domains(args):
         ssl_cert, ssl_key = _resolve_cert_key_args(args, required=False)
@@ -1207,70 +1395,121 @@ Examples:
             memo=args.memo,
             auth=get_auth_params(args.id, args.api_key),
             skip_verify=args.skip_verify,
-            auto_deploy=not args.no_auto_deploy
+            auto_deploy=not args.no_auto_deploy,
         )
 
     parser_domains.set_defaults(func=_run_domains)
 
     # --- validate command ---
     parser_validate = subparsers.add_parser(
-        "validate",
-        help="Validate SSL certificate files (local verification)"
+        "validate", help="Validate SSL certificate files (local verification)"
     )
-    parser_validate.add_argument("--cert-dir", dest="cert_dir",
-                               help="Directory containing certificate files (auto-detected filenames)")
-    parser_validate.add_argument("--domain", dest="domain",
-                               help="Domain to auto-locate under ~/Certificate/, and to verify against the certificate")
-    parser_validate.add_argument("--ssl-key-password", dest="ssl_key_password",
-                               help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)")
-    parser_validate.set_defaults(func=lambda args: workflow_validate(
-        cert_dir=_resolve_validate_cert_dir(args),
-        domain=args.domain,
-        key_password=args.ssl_key_password or os.environ.get("ONS_SSL_KEY_PASSWORD"),
-    ))
+    parser_validate.add_argument(
+        "--cert-dir",
+        dest="cert_dir",
+        help="Directory containing certificate files (auto-detected filenames)",
+    )
+    parser_validate.add_argument(
+        "--domain",
+        dest="domain",
+        help="Domain to auto-locate under ~/Certificate/, and to verify against the certificate",
+    )
+    parser_validate.add_argument(
+        "--ssl-key-password",
+        dest="ssl_key_password",
+        help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)",
+    )
+    parser_validate.set_defaults(
+        func=lambda args: workflow_validate(
+            cert_dir=_resolve_validate_cert_dir(args),
+            domain=args.domain,
+            key_password=args.ssl_key_password
+            or os.environ.get("ONS_SSL_KEY_PASSWORD"),
+        )
+    )
 
     # --- compare command ---
     parser_compare = subparsers.add_parser(
         "compare",
         help="Compare local certificate with ONS CDN deployed certificate",
-        parents=[auth_parser]
+        parents=[auth_parser],
     )
-    parser_compare.add_argument("--cert-dir", dest="cert_dir",
-                               help="Directory containing certificate files (auto-detected filenames)")
-    parser_compare.add_argument("--ssl-file-name", dest="ssl_file_name", required=True,
-                               help="Certificate file name on ONS CDN (without extension)")
-    parser_compare.add_argument("--domain", dest="domain",
-                               help="Expected domain name to verify against certificate")
-    parser_compare.add_argument("--ssl-key-password", dest="ssl_key_password",
-                               help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)")
-    parser_compare.set_defaults(func=lambda args: workflow_compare(
-        cert_dir=_resolve_validate_cert_dir(args),
-        ssl_file_name=args.ssl_file_name,
-        domain=args.domain,
-        auth=get_auth_params(args.id, args.api_key),
-        key_password=args.ssl_key_password or os.environ.get("ONS_SSL_KEY_PASSWORD"),
-    ))
+    parser_compare.add_argument(
+        "--cert-dir",
+        dest="cert_dir",
+        help="Directory containing certificate files (auto-detected filenames)",
+    )
+    parser_compare.add_argument(
+        "--ssl-file-name",
+        dest="ssl_file_name",
+        required=True,
+        help="Certificate file name on ONS CDN (without extension)",
+    )
+    parser_compare.add_argument(
+        "--domain",
+        dest="domain",
+        help="Expected domain name to verify against certificate",
+    )
+    parser_compare.add_argument(
+        "--ssl-key-password",
+        dest="ssl_key_password",
+        help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)",
+    )
+    parser_compare.set_defaults(
+        func=lambda args: workflow_compare(
+            cert_dir=_resolve_validate_cert_dir(args),
+            ssl_file_name=args.ssl_file_name,
+            domain=args.domain,
+            auth=get_auth_params(args.id, args.api_key),
+            key_password=args.ssl_key_password
+            or os.environ.get("ONS_SSL_KEY_PASSWORD"),
+        )
+    )
 
     # --- lookup command ---
     parser_lookup = subparsers.add_parser(
-        "lookup",
-        help="Lookup SSL certificate information",
-        parents=[auth_parser]
+        "lookup", help="Lookup SSL certificate information", parents=[auth_parser]
     )
-    parser_lookup.add_argument("--ssl-file-name", dest="ssl_file_name", required=True,
-                              help="Certificate file name (without extension)")
-    parser_lookup.add_argument("--verify", action="store_true",
-                              help="Perform SSL certificate verification")
-    parser_lookup.set_defaults(func=lambda args: workflow_lookup(
-        ssl_file_name=args.ssl_file_name,
-        auth=get_auth_params(args.id, args.api_key),
-        verify=args.verify
-    ))
+    parser_lookup.add_argument(
+        "--ssl-file-name",
+        dest="ssl_file_name",
+        required=True,
+        help="Certificate file name (without extension)",
+    )
+    parser_lookup.add_argument(
+        "--verify", action="store_true", help="Perform SSL certificate verification"
+    )
+    parser_lookup.set_defaults(
+        func=lambda args: workflow_lookup(
+            ssl_file_name=args.ssl_file_name,
+            auth=get_auth_params(args.id, args.api_key),
+            verify=args.verify,
+        )
+    )
+
+    # --- list command ---
+    parser_list = subparsers.add_parser(
+        "list",
+        help="List all SSL certificates registered on the ONS CDN platform",
+        parents=[auth_parser],
+    )
+    parser_list.add_argument(
+        "--domain",
+        dest="domain",
+        help="Filter results to certificates whose domain_list contains this substring",
+    )
+    parser_list.set_defaults(
+        func=lambda args: workflow_list(
+            domain=args.domain,
+            auth=get_auth_params(args.id, args.api_key),
+        )
+    )
 
     return parser
 
 
 # --- Main ---
+
 
 def main() -> None:
     """Main entry point."""
