@@ -21,6 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+from cert_discovery import CertDiscoveryError, get_cert_bundle, resolve_cert_dir
+
 
 # --- Configuration ---
 # API key must come from the environment (never hardcode: public repository)
@@ -194,9 +196,10 @@ def verify_key_cert_match(cert_path: str, key_path: str) -> bool:
         return False
 
 
-def validate_certificate_files(cert_dir: str, domain: str = None) -> dict:
+def validate_certificate_files(cert_dir: str, domain: str = None, key_password: str = None) -> dict:
     """
-    Validate certificate files in a directory.
+    Validate certificate files in a directory, auto-detecting vendor
+    filenames via cert_discovery.
 
     Returns dict with:
         - valid: bool
@@ -207,18 +210,14 @@ def validate_certificate_files(cert_dir: str, domain: str = None) -> dict:
     errors = []
     warnings = []
 
-    cert_path = Path(cert_dir) / "ssl.crt"
-    key_path = Path(cert_dir) / "ssl.key"
-    fullchain_path = Path(cert_dir) / "fullchain.pem"
+    try:
+        bundle = get_cert_bundle(Path(cert_dir), key_password)
+    except CertDiscoveryError as e:
+        return {"valid": False, "errors": [str(e)], "warnings": warnings}
 
-    # Check required files exist
-    if not cert_path.exists():
-        errors.append(f"Certificate file not found: {cert_path}")
-    if not key_path.exists():
-        errors.append(f"Private key file not found: {key_path}")
-
-    if errors:
-        return {"valid": False, "errors": errors, "warnings": warnings}
+    cert_path = bundle["cert"]
+    key_path = bundle["key"]
+    fullchain_path = bundle["fullchain"]
 
     # Verify certificate
     cert_info = verify_certificate_expiry(str(cert_path))
@@ -244,35 +243,29 @@ def validate_certificate_files(cert_dir: str, domain: str = None) -> dict:
     else:
         print_success("Private key matches certificate")
 
-    # Verify certificate chain (if fullchain exists)
-    chain_info = None
-    if fullchain_path.exists():
-        chain_info = verify_certificate_chain(str(fullchain_path))
-        if chain_info.get("valid"):
-            print_success(f"Certificate chain verified ({len(chain_info.get('chain', []))//2} certificates)")
-        else:
-            errors.append(f"Certificate chain verification failed: {chain_info.get('error', 'Unknown error')}")
+    # Verify certificate chain
+    chain_info = verify_certificate_chain(str(fullchain_path))
+    if chain_info.get("valid"):
+        print_success(f"Certificate chain verified ({len(chain_info.get('chain', []))} certificates)")
+    else:
+        errors.append(f"Certificate chain verification failed: {chain_info.get('error', 'Unknown error')}")
 
     # Check domain match if provided
     if domain and cert_info.get("subject"):
         if domain.lower() not in cert_info["subject"].lower():
-            # Check SAN in fullchain if available
-            if fullchain_path.exists():
-                san_check = subprocess.run(
-                    ["openssl", "x509", "-in", str(fullchain_path), "-noout", "-text"],
-                    capture_output=True, text=True, timeout=10
-                )
-                if domain.lower() not in san_check.stdout.lower():
-                    warnings.append(f"Domain '{domain}' not found in certificate Subject or SAN")
-            else:
-                warnings.append(f"Domain '{domain}' not found in certificate Subject")
+            san_check = subprocess.run(
+                ["openssl", "x509", "-in", str(fullchain_path), "-noout", "-text"],
+                capture_output=True, text=True, timeout=10
+            )
+            if domain.lower() not in san_check.stdout.lower():
+                warnings.append(f"Domain '{domain}' not found in certificate Subject or SAN")
 
     return {
         "valid": len(errors) == 0,
         "errors": errors,
         "warnings": warnings,
         "cert_info": cert_info,
-        "chain_info": chain_info
+        "chain_info": chain_info,
     }
 
 
@@ -723,7 +716,8 @@ def workflow_lookup(
 
 def workflow_validate(
     cert_dir: str,
-    domain: str = None
+    domain: str = None,
+    key_password: str = None
 ) -> dict:
     """
     Validate SSL certificate files locally.
@@ -738,7 +732,7 @@ def workflow_validate(
     print_step(1, 1, f"Validating certificate files in: {cert_dir}")
 
     # Validate certificate files
-    validation = validate_certificate_files(cert_dir, domain)
+    validation = validate_certificate_files(cert_dir, domain, key_password)
 
     # Print certificate info
     if validation.get("cert_info"):
@@ -951,7 +945,8 @@ def workflow_compare(
     cert_dir: str,
     ssl_file_name: str,
     domain: str = None,
-    auth: dict = None
+    auth: dict = None,
+    key_password: str = None
 ) -> dict:
     """
     Compare local certificate with ONS CDN deployed certificate.
@@ -966,7 +961,7 @@ def workflow_compare(
     # Step 1: Validate local certificate
     print_step(1, 3, f"로컬 인증서 검증: {cert_dir}")
 
-    validation = validate_certificate_files(cert_dir, domain)
+    validation = validate_certificate_files(cert_dir, domain, key_password)
     local_cert_info = validation.get("cert_info", {})
 
     if not validation["valid"]:
