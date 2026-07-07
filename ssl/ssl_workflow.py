@@ -1014,6 +1014,53 @@ def workflow_compare(
         }
 
 
+# --- CLI Resolution Helpers ---
+
+def _resolve_validate_cert_dir(args) -> str:
+	"""Resolve the cert directory for validate/compare from --cert-dir or --domain."""
+	if args.cert_dir:
+		return args.cert_dir
+	if not args.domain:
+		print_error("Either --cert-dir or --domain must be provided.")
+		sys.exit(1)
+	try:
+		return str(resolve_cert_dir(args.domain))
+	except CertDiscoveryError as e:
+		print_error(str(e))
+		sys.exit(1)
+
+
+def _resolve_cert_key_args(args, required: bool = True):
+	"""Resolve (ssl_cert, ssl_key) from explicit flags or --domain auto-detection.
+
+	Returns (None, None) if neither is provided and required=False (the
+	'domains' command allows a pure domain-list change without touching
+	the certificate).
+	"""
+	if args.ssl_cert and args.ssl_key:
+		return args.ssl_cert, args.ssl_key
+	if args.ssl_cert or args.ssl_key:
+		print_error("Provide both --ssl-cert and --ssl-key together, or use --domain for auto-detection.")
+		sys.exit(1)
+
+	domain = getattr(args, "domain", None)
+	if not domain:
+		if required:
+			print_error("Provide --ssl-cert/--ssl-key, or --domain for auto-detection.")
+			sys.exit(1)
+		return None, None
+
+	try:
+		cert_dir = resolve_cert_dir(domain)
+		password = getattr(args, "ssl_key_password", None) or os.environ.get("ONS_SSL_KEY_PASSWORD")
+		bundle = get_cert_bundle(cert_dir, password)
+	except CertDiscoveryError as e:
+		print_error(str(e))
+		sys.exit(1)
+
+	return str(bundle["fullchain"]), str(bundle["key"])
+
+
 # --- Argument Parser ---
 
 def create_parser() -> argparse.ArgumentParser:
@@ -1056,10 +1103,14 @@ Examples:
     )
     parser_new.add_argument("--ssl-file-name", dest="ssl_file_name", required=True,
                             help="Certificate file name (without extension)")
-    parser_new.add_argument("--ssl-cert", dest="ssl_cert", required=True,
+    parser_new.add_argument("--ssl-cert", dest="ssl_cert",
                             help="Path to SSL certificate file (fullchain)")
-    parser_new.add_argument("--ssl-key", dest="ssl_key", required=True,
+    parser_new.add_argument("--ssl-key", dest="ssl_key",
                             help="Path to SSL private key file")
+    parser_new.add_argument("--domain", dest="domain",
+                            help="Domain to auto-locate under ~/Certificate/ instead of --ssl-cert/--ssl-key")
+    parser_new.add_argument("--ssl-key-password", dest="ssl_key_password",
+                            help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)")
     parser_new.add_argument("--domain-list", dest="domain_list",
                             help="Comma-separated list of domains")
     parser_new.add_argument("--memo", help="Memo for the deployment")
@@ -1067,16 +1118,21 @@ Examples:
                             help="Skip verification step")
     parser_new.add_argument("--no-auto-deploy", dest="no_auto_deploy", action="store_true",
                             help="Skip automatic final deployment")
-    parser_new.set_defaults(func=lambda args: workflow_new_cert(
-        ssl_file_name=args.ssl_file_name,
-        ssl_cert=args.ssl_cert,
-        ssl_key=args.ssl_key,
-        domain_list=args.domain_list,
-        memo=args.memo,
-        auth=get_auth_params(args.id, args.api_key),
-        skip_verify=args.skip_verify,
-        auto_deploy=not args.no_auto_deploy
-    ))
+
+    def _run_new(args):
+        ssl_cert, ssl_key = _resolve_cert_key_args(args)
+        return workflow_new_cert(
+            ssl_file_name=args.ssl_file_name,
+            ssl_cert=ssl_cert,
+            ssl_key=ssl_key,
+            domain_list=args.domain_list,
+            memo=args.memo,
+            auth=get_auth_params(args.id, args.api_key),
+            skip_verify=args.skip_verify,
+            auto_deploy=not args.no_auto_deploy
+        )
+
+    parser_new.set_defaults(func=_run_new)
 
     # --- renew command ---
     parser_renew = subparsers.add_parser(
@@ -1086,24 +1142,33 @@ Examples:
     )
     parser_renew.add_argument("--ssl-file-name", dest="ssl_file_name", required=True,
                               help="Certificate file name (without extension)")
-    parser_renew.add_argument("--ssl-cert", dest="ssl_cert", required=True,
+    parser_renew.add_argument("--ssl-cert", dest="ssl_cert",
                               help="Path to new SSL certificate file")
-    parser_renew.add_argument("--ssl-key", dest="ssl_key", required=True,
+    parser_renew.add_argument("--ssl-key", dest="ssl_key",
                               help="Path to new SSL private key file")
+    parser_renew.add_argument("--domain", dest="domain",
+                              help="Domain to auto-locate under ~/Certificate/ instead of --ssl-cert/--ssl-key")
+    parser_renew.add_argument("--ssl-key-password", dest="ssl_key_password",
+                              help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)")
     parser_renew.add_argument("--memo", help="Memo for the update")
     parser_renew.add_argument("--skip-verify", dest="skip_verify", action="store_true",
                               help="Skip verification step")
     parser_renew.add_argument("--no-auto-deploy", dest="no_auto_deploy", action="store_true",
                               help="Skip automatic final deployment")
-    parser_renew.set_defaults(func=lambda args: workflow_renew_cert(
-        ssl_file_name=args.ssl_file_name,
-        ssl_cert=args.ssl_cert,
-        ssl_key=args.ssl_key,
-        memo=args.memo,
-        auth=get_auth_params(args.id, args.api_key),
-        skip_verify=args.skip_verify,
-        auto_deploy=not args.no_auto_deploy
-    ))
+
+    def _run_renew(args):
+        ssl_cert, ssl_key = _resolve_cert_key_args(args)
+        return workflow_renew_cert(
+            ssl_file_name=args.ssl_file_name,
+            ssl_cert=ssl_cert,
+            ssl_key=ssl_key,
+            memo=args.memo,
+            auth=get_auth_params(args.id, args.api_key),
+            skip_verify=args.skip_verify,
+            auto_deploy=not args.no_auto_deploy
+        )
+
+    parser_renew.set_defaults(func=_run_renew)
 
     # --- domains command ---
     parser_domains = subparsers.add_parser(
@@ -1121,35 +1186,47 @@ Examples:
                                help="Path to new SSL certificate file (optional)")
     parser_domains.add_argument("--ssl-key", dest="ssl_key",
                                help="Path to new SSL private key file (optional)")
+    parser_domains.add_argument("--domain", dest="domain",
+                               help="Domain to auto-locate under ~/Certificate/ for a certificate rotation (optional)")
+    parser_domains.add_argument("--ssl-key-password", dest="ssl_key_password",
+                               help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)")
     parser_domains.add_argument("--memo", help="Memo for the update")
     parser_domains.add_argument("--skip-verify", dest="skip_verify", action="store_true",
                                help="Skip verification step")
     parser_domains.add_argument("--no-auto-deploy", dest="no_auto_deploy", action="store_true",
                                help="Skip automatic final deployment")
-    parser_domains.set_defaults(func=lambda args: workflow_domain_update(
-        ssl_file_name=args.ssl_file_name,
-        add_domain_list=args.add_domain_list,
-        del_domain_list=args.del_domain_list,
-        ssl_cert=args.ssl_cert,
-        ssl_key=args.ssl_key,
-        memo=args.memo,
-        auth=get_auth_params(args.id, args.api_key),
-        skip_verify=args.skip_verify,
-        auto_deploy=not args.no_auto_deploy
-    ))
+
+    def _run_domains(args):
+        ssl_cert, ssl_key = _resolve_cert_key_args(args, required=False)
+        return workflow_domain_update(
+            ssl_file_name=args.ssl_file_name,
+            add_domain_list=args.add_domain_list,
+            del_domain_list=args.del_domain_list,
+            ssl_cert=ssl_cert,
+            ssl_key=ssl_key,
+            memo=args.memo,
+            auth=get_auth_params(args.id, args.api_key),
+            skip_verify=args.skip_verify,
+            auto_deploy=not args.no_auto_deploy
+        )
+
+    parser_domains.set_defaults(func=_run_domains)
 
     # --- validate command ---
     parser_validate = subparsers.add_parser(
         "validate",
         help="Validate SSL certificate files (local verification)"
     )
-    parser_validate.add_argument("--cert-dir", dest="cert_dir", required=True,
-                               help="Directory containing certificate files (ssl.crt, ssl.key, fullchain.pem)")
+    parser_validate.add_argument("--cert-dir", dest="cert_dir",
+                               help="Directory containing certificate files (auto-detected filenames)")
     parser_validate.add_argument("--domain", dest="domain",
-                               help="Expected domain name to verify against certificate")
+                               help="Domain to auto-locate under ~/Certificate/, and to verify against the certificate")
+    parser_validate.add_argument("--ssl-key-password", dest="ssl_key_password",
+                               help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)")
     parser_validate.set_defaults(func=lambda args: workflow_validate(
-        cert_dir=args.cert_dir,
-        domain=args.domain
+        cert_dir=_resolve_validate_cert_dir(args),
+        domain=args.domain,
+        key_password=args.ssl_key_password or os.environ.get("ONS_SSL_KEY_PASSWORD"),
     ))
 
     # --- compare command ---
@@ -1158,17 +1235,20 @@ Examples:
         help="Compare local certificate with ONS CDN deployed certificate",
         parents=[auth_parser]
     )
-    parser_compare.add_argument("--cert-dir", dest="cert_dir", required=True,
-                               help="Directory containing certificate files (ssl.crt, ssl.key, fullchain.pem)")
+    parser_compare.add_argument("--cert-dir", dest="cert_dir",
+                               help="Directory containing certificate files (auto-detected filenames)")
     parser_compare.add_argument("--ssl-file-name", dest="ssl_file_name", required=True,
                                help="Certificate file name on ONS CDN (without extension)")
     parser_compare.add_argument("--domain", dest="domain",
                                help="Expected domain name to verify against certificate")
+    parser_compare.add_argument("--ssl-key-password", dest="ssl_key_password",
+                               help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)")
     parser_compare.set_defaults(func=lambda args: workflow_compare(
-        cert_dir=args.cert_dir,
+        cert_dir=_resolve_validate_cert_dir(args),
         ssl_file_name=args.ssl_file_name,
         domain=args.domain,
-        auth=get_auth_params(args.id, args.api_key)
+        auth=get_auth_params(args.id, args.api_key),
+        key_password=args.ssl_key_password or os.environ.get("ONS_SSL_KEY_PASSWORD"),
     ))
 
     # --- lookup command ---
