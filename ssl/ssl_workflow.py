@@ -16,6 +16,7 @@ import re
 import socket
 import subprocess
 import sys
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -246,7 +247,7 @@ def validate_certificate_files(cert_dir: str, domain: str = None) -> dict:
     # Verify certificate chain (if fullchain exists)
     chain_info = None
     if fullchain_path.exists():
-        chain_info = verify_certificate_chain(str(fullchain_path), cert_dir)
+        chain_info = verify_certificate_chain(str(fullchain_path))
         if chain_info.get("valid"):
             print_success(f"Certificate chain verified ({len(chain_info.get('chain', []))//2} certificates)")
         else:
@@ -275,48 +276,36 @@ def validate_certificate_files(cert_dir: str, domain: str = None) -> dict:
     }
 
 
-def verify_certificate_chain(fullchain_path: str, cert_dir: str) -> dict:
+def verify_certificate_chain(fullchain_path: str, trusted_ca_file: Optional[str] = None) -> dict:
     """
     Verify the full certificate chain using OpenSSL.
 
+    fullchain_path must contain the leaf certificate followed by any
+    intermediate certificates (as produced by cert_discovery.build_fullchain
+    or an already-merged fullchain.pem). No customer-specific root chain
+    directory is required — the system's default CA trust store is used
+    unless trusted_ca_file overrides it (used by tests to stay hermetic).
+
     Returns dict with:
         - valid: bool
-        - chain: list of certificate subjects
+        - chain: list of {"subject": str, "issuer": str} certificate links
         - error: error message if failed
     """
     try:
-        # Look for root chain files in the original directory
-        original_dir = Path(cert_dir).parent / f"{Path(cert_dir).name}_2026032792EC5"
-        root_chain_path = original_dir / "RootChain" / "root-chain-bundle.pem"
-        intermediate_path = original_dir / "RootChain" / "GoGetSSLRSADVCAChain2.crt.pem"
+        pem_blocks = re.findall(
+            r"-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----",
+            Path(fullchain_path).read_text(), re.DOTALL,
+        )
+        if not pem_blocks:
+            return {"valid": False, "chain": [], "error": "No certificates found in fullchain"}
 
-        # If chain files don't exist, try alternate locations
-        if not root_chain_path.exists():
-            root_chain_path = original_dir / "RootChain" / "chain-bundle.pem"
-        if not root_chain_path.exists():
-            return {"valid": False, "error": "Root chain file not found"}
-
-        # Verify using openssl
-        cmd = [
-            "openssl", "verify",
-            "-CAfile", str(root_chain_path),
-            "-untrusted", str(intermediate_path) if intermediate_path.exists() else str(root_chain_path),
-            str(fullchain_path)
-        ]
-
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
-
-        # Extract certificate chain info using pipe
+        # Extract subject/issuer pairs for display purposes.
         chain_cmd = f"""
             openssl crl2pkcs7 -nocrl -certfile "{fullchain_path}" | \
             openssl pkcs7 -print_certs -noout 2>/dev/null
         """
         chain_result = subprocess.run(
-            chain_cmd,
-            shell=True,
-            capture_output=True,
-            text=True,
-            timeout=15
+            chain_cmd, shell=True, capture_output=True, text=True, timeout=15
         )
 
         chain = []
@@ -331,17 +320,30 @@ def verify_certificate_chain(fullchain_path: str, cert_dir: str) -> dict:
                     chain.append({"subject": current_subject, "issuer": issuer})
                     current_subject = None
 
+        leaf, intermediates = pem_blocks[0], pem_blocks[1:]
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            leaf_path = Path(tmpdir) / "leaf.pem"
+            leaf_path.write_text(leaf)
+
+            cmd = ["openssl", "verify"]
+            if trusted_ca_file:
+                cmd += ["-CAfile", trusted_ca_file]
+            if intermediates:
+                untrusted_path = Path(tmpdir) / "untrusted.pem"
+                untrusted_path.write_text("\n".join(intermediates))
+                cmd += ["-untrusted", str(untrusted_path)]
+            cmd.append(str(leaf_path))
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+
         if result.returncode == 0:
-            return {
-                "valid": True,
-                "chain": chain,
-                "message": result.stdout.strip()
-            }
+            return {"valid": True, "chain": chain, "message": result.stdout.strip()}
         else:
             return {
                 "valid": False,
                 "chain": chain,
-                "error": result.stderr.strip() or result.stdout.strip()
+                "error": result.stderr.strip() or result.stdout.strip(),
             }
 
     except subprocess.TimeoutExpired:
