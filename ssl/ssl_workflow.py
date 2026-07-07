@@ -70,6 +70,18 @@ def extract_cn(dn: str) -> str:
     return dn
 
 
+def _display_width(s: str) -> int:
+    """Terminal display width of a string (wide/fullwidth chars like Korean count as 2)."""
+    import unicodedata
+
+    return sum(2 if unicodedata.east_asian_width(ch) in ("W", "F") else 1 for ch in s)
+
+
+def _pad(s: str, width: int) -> str:
+    """Left-align s within a field of the given display width (Korean-safe, unlike str.ljust)."""
+    return s + " " * max(0, width - _display_width(s))
+
+
 def _parse_expiry_date(not_after: str) -> Optional[int]:
     """Parse certificate notAfter string and return days_left, or None on failure."""
     date_formats = ["%b %d %H:%M:%S %Y %Z", "%b %d %H:%M:%S %Y GMT"]
@@ -996,31 +1008,39 @@ def print_comparison(local_info: dict, ons_info: dict, domain: str = None) -> No
     def status_icon(matches: bool) -> str:
         return "\033[92m✓\033[0m" if matches else "\033[91m✗\033[0m"
 
+    col_widths = (14, 35, 35, 6)
+
+    def row(label: str, local_val: str, ons_val: str, status: str) -> str:
+        return " ".join(
+            [
+                _pad(label, col_widths[0]),
+                _pad(local_val, col_widths[1]),
+                _pad(ons_val, col_widths[2]),
+                _pad(status, col_widths[3]),
+            ]
+        )
+
     # Table header
-    print(f"{'항목':<20} {'로컬':<35} {'ONS CDN':<35} {'상태':<8}")
-    print("-" * 100)
+    print(row("항목", "로컬", "ONS CDN", "상태"))
+    print("-" * (sum(col_widths) + len(col_widths) - 1))
 
     # Serial
     local_serial = local_info.get("serial", "N/A")
     ons_serial = ons_info.get("serial", "N/A")
     serial_match = local_serial == ons_serial
-    print(
-        f"{'Serial':<20} {local_serial:<35} {ons_serial:<35} {status_icon(serial_match):<8}"
-    )
+    print(row("Serial", local_serial, ons_serial, status_icon(serial_match)))
 
     # Subject/CN
     local_cn = extract_cn(local_info.get("subject", ""))
     ons_cn = extract_cn(ons_info.get("subject", ""))
     cn_match = local_cn == ons_cn
-    print(f"{'Domain (CN)':<20} {local_cn:<35} {ons_cn:<35} {status_icon(cn_match):<8}")
+    print(row("Domain (CN)", local_cn, ons_cn, status_icon(cn_match)))
 
     # Expiry Date
     local_expiry = local_info.get("notAfter", "N/A")
     ons_expiry = ons_info.get("not_after", ons_info.get("notAfter", "N/A"))
     expiry_match = local_expiry == ons_expiry
-    print(
-        f"{'만료일':<20} {local_expiry:<35} {ons_expiry:<35} {status_icon(expiry_match):<8}"
-    )
+    print(row("만료일", local_expiry, ons_expiry, status_icon(expiry_match)))
 
     # Days Left
     local_days = local_info.get("days_left", "N/A")
@@ -1028,20 +1048,23 @@ def print_comparison(local_info: dict, ons_info: dict, domain: str = None) -> No
     if isinstance(local_days, int) and isinstance(ons_days, int):
         days_match = local_days == ons_days
         print(
-            f"{'남은 일수':<20} {f'{local_days}일':<35} {f'{ons_days}일':<35} {status_icon(days_match):<8}"
+            row(
+                "남은 일수",
+                f"{local_days}일",
+                f"{ons_days}일",
+                status_icon(days_match),
+            )
         )
     else:
-        print(f"{'남은 일수':<20} {str(local_days):<35} {str(ons_days):<35} {'N/A':<8}")
+        print(row("남은 일수", str(local_days), str(ons_days), "N/A"))
 
     # Issuer
     local_issuer = extract_cn(local_info.get("issuer", ""))
     ons_issuer = extract_cn(ons_info.get("issuer", ""))
     issuer_match = local_issuer == ons_issuer
-    print(
-        f"{'Issuer':<20} {local_issuer:<35} {ons_issuer:<35} {status_icon(issuer_match):<8}"
-    )
+    print(row("Issuer", local_issuer, ons_issuer, status_icon(issuer_match)))
 
-    print("=" * 100)
+    print("=" * (sum(col_widths) + len(col_widths) - 1))
 
     # Overall result
     all_match = serial_match and cn_match and expiry_match and issuer_match
