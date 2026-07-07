@@ -1017,48 +1017,48 @@ def workflow_compare(
 # --- CLI Resolution Helpers ---
 
 def _resolve_validate_cert_dir(args) -> str:
-	"""Resolve the cert directory for validate/compare from --cert-dir or --domain."""
-	if args.cert_dir:
-		return args.cert_dir
-	if not args.domain:
-		print_error("Either --cert-dir or --domain must be provided.")
-		sys.exit(1)
-	try:
-		return str(resolve_cert_dir(args.domain))
-	except CertDiscoveryError as e:
-		print_error(str(e))
-		sys.exit(1)
+    """Resolve the cert directory for validate/compare from --cert-dir or --domain."""
+    if args.cert_dir:
+        return args.cert_dir
+    if not args.domain:
+        print_error("Either --cert-dir or --domain must be provided.")
+        sys.exit(1)
+    try:
+        return str(resolve_cert_dir(args.domain))
+    except CertDiscoveryError as e:
+        print_error(str(e))
+        sys.exit(1)
 
 
 def _resolve_cert_key_args(args, required: bool = True):
-	"""Resolve (ssl_cert, ssl_key) from explicit flags or --domain auto-detection.
+    """Resolve (ssl_cert, ssl_key) from explicit flags or --domain auto-detection.
 
-	Returns (None, None) if neither is provided and required=False (the
-	'domains' command allows a pure domain-list change without touching
-	the certificate).
-	"""
-	if args.ssl_cert and args.ssl_key:
-		return args.ssl_cert, args.ssl_key
-	if args.ssl_cert or args.ssl_key:
-		print_error("Provide both --ssl-cert and --ssl-key together, or use --domain for auto-detection.")
-		sys.exit(1)
+    Returns (None, None) if neither is provided and required=False (the
+    'domains' command allows a pure domain-list change without touching
+    the certificate).
+    """
+    if args.ssl_cert and args.ssl_key:
+        return args.ssl_cert, args.ssl_key
+    if args.ssl_cert or args.ssl_key:
+        print_error("Provide both --ssl-cert and --ssl-key together, or use --domain for auto-detection.")
+        sys.exit(1)
 
-	domain = getattr(args, "domain", None)
-	if not domain:
-		if required:
-			print_error("Provide --ssl-cert/--ssl-key, or --domain for auto-detection.")
-			sys.exit(1)
-		return None, None
+    domain = getattr(args, "domain", None)
+    if not domain:
+        if required:
+            print_error("Provide --ssl-cert/--ssl-key, or --domain for auto-detection.")
+            sys.exit(1)
+        return None, None
 
-	try:
-		cert_dir = resolve_cert_dir(domain)
-		password = getattr(args, "ssl_key_password", None) or os.environ.get("ONS_SSL_KEY_PASSWORD")
-		bundle = get_cert_bundle(cert_dir, password)
-	except CertDiscoveryError as e:
-		print_error(str(e))
-		sys.exit(1)
+    try:
+        cert_dir = resolve_cert_dir(domain)
+        password = getattr(args, "ssl_key_password", None) or os.environ.get("ONS_SSL_KEY_PASSWORD")
+        bundle = get_cert_bundle(cert_dir, password)
+    except CertDiscoveryError as e:
+        print_error(str(e))
+        sys.exit(1)
 
-	return str(bundle["fullchain"]), str(bundle["key"])
+    return str(bundle["fullchain"]), str(bundle["key"])
 
 
 # --- Argument Parser ---
