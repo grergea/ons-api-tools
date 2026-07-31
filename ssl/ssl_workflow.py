@@ -17,6 +17,7 @@ import socket
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -465,6 +466,49 @@ def run_manager_command(command: list) -> dict:
         return {"success": True, "raw": result.stdout}
 
 
+_PRE_DEPLOYMENT_RETRY_MSG = "pre-deployment has not been completed"
+_PRE_DEPLOYMENT_MAX_RETRIES = 6
+_PRE_DEPLOYMENT_RETRY_WAIT_SECONDS = 20
+
+
+def deploy_cert(auth: dict, ssl_file_name: str) -> dict:
+    """Finalize deployment of a staged certificate, retrying while ONS is
+    still propagating the staging deployment.
+
+    ONS occasionally rejects the final deploy call with "Pre-deployment
+    has not been completed" for a short window right after a successful
+    staging-deploy/staging-update, even though staging history already
+    shows 100% success. Retrying with a short wait clears it without
+    manual intervention.
+    """
+    for attempt in range(1, _PRE_DEPLOYMENT_MAX_RETRIES + 1):
+        result = run_manager_command(
+            ["deploy", *_auth_args(auth), "--ssl-file-name", ssl_file_name]
+        )
+        if not result["success"]:
+            return {"success": False, "step": 3}
+
+        api_resp = result.get("data", {}).get("api_response", {})
+        if api_resp.get("result_code") == "200":
+            return {"success": True}
+
+        result_msg = api_resp.get("result_msg", "Unknown")
+        is_propagation_delay = _PRE_DEPLOYMENT_RETRY_MSG in result_msg.lower()
+        if is_propagation_delay and attempt < _PRE_DEPLOYMENT_MAX_RETRIES:
+            print_warning(
+                f"Staging still propagating (attempt {attempt}/"
+                f"{_PRE_DEPLOYMENT_MAX_RETRIES}) — retrying in "
+                f"{_PRE_DEPLOYMENT_RETRY_WAIT_SECONDS}s"
+            )
+            time.sleep(_PRE_DEPLOYMENT_RETRY_WAIT_SECONDS)
+            continue
+
+        print_error(f"API error: {result_msg}")
+        return {"success": False, "step": 3, "error": api_resp}
+
+    return {"success": False, "step": 3}
+
+
 def get_auth_params(id: str = None, api_key: str = None) -> dict:
     """Get authentication parameters."""
     key = api_key or DEFAULT_AUTH["api_key"]
@@ -569,16 +613,9 @@ def workflow_new_cert(
     if auto_deploy:
         print_step(3, steps, f"Finalizing deployment: {ssl_file_name}")
 
-        result = run_manager_command(
-            ["deploy", *_auth_args(auth), "--ssl-file-name", ssl_file_name]
-        )
-        if not result["success"]:
-            return {"success": False, "step": 3}
-
-        api_resp = result.get("data", {}).get("api_response", {})
-        if api_resp.get("result_code") != "200":
-            print_error(f"API error: {api_resp.get('result_msg', 'Unknown')}")
-            return {"success": False, "step": 3}
+        deploy_result = deploy_cert(auth, ssl_file_name)
+        if not deploy_result["success"]:
+            return deploy_result
 
         print_success("Deployment finalized")
     else:
@@ -655,16 +692,9 @@ def workflow_renew_cert(
     if auto_deploy:
         print_step(3, steps, f"Finalizing deployment: {ssl_file_name}")
 
-        result = run_manager_command(
-            ["deploy", *_auth_args(auth), "--ssl-file-name", ssl_file_name]
-        )
-        if not result["success"]:
-            return {"success": False, "step": 3}
-
-        api_resp = result.get("data", {}).get("api_response", {})
-        if api_resp.get("result_code") != "200":
-            print_error(f"API error: {api_resp.get('result_msg', 'Unknown')}")
-            return {"success": False, "step": 3}
+        deploy_result = deploy_cert(auth, ssl_file_name)
+        if not deploy_result["success"]:
+            return deploy_result
 
         print_success("Deployment finalized")
     else:
@@ -751,16 +781,9 @@ def workflow_domain_update(
     if auto_deploy:
         print_step(3, steps, f"Finalizing deployment: {ssl_file_name}")
 
-        result = run_manager_command(
-            ["deploy", *_auth_args(auth), "--ssl-file-name", ssl_file_name]
-        )
-        if not result["success"]:
-            return {"success": False, "step": 3}
-
-        api_resp = result.get("data", {}).get("api_response", {})
-        if api_resp.get("result_code") != "200":
-            print_error(f"API error: {api_resp.get('result_msg', 'Unknown')}")
-            return {"success": False, "step": 3}
+        deploy_result = deploy_cert(auth, ssl_file_name)
+        if not deploy_result["success"]:
+            return deploy_result
 
         print_success("Deployment finalized")
     else:
