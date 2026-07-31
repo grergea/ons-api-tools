@@ -325,7 +325,11 @@ def lookup(args: argparse.Namespace) -> None:
                     primary_domain,
                 ]
                 proc = subprocess.run(
-                    cmd, stdin=subprocess.DEVNULL, capture_output=True, timeout=15
+                    cmd,
+                    stdin=subprocess.DEVNULL,
+                    capture_output=True,
+                    timeout=15,
+                    text=True,
                 )
 
                 # Extract certificate info

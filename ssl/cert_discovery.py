@@ -22,7 +22,7 @@ _IGNORED_NAMES = {".ds_store", "fullchain.pem"}
 _CHAIN_PATTERN = re.compile(r"chain", re.IGNORECASE)
 _KEY_PATTERN = re.compile(r"key", re.IGNORECASE)
 _NOPASS_KEY_PATTERN = re.compile(r"^nopass.*key", re.IGNORECASE)
-_CERT_PATTERN = re.compile(r"cert|\.crt$", re.IGNORECASE)
+_CERT_PATTERN = re.compile(r"cert|\.(crt|cer|pem)$", re.IGNORECASE)
 
 
 class CertDiscoveryError(Exception):
@@ -72,7 +72,8 @@ def discover_cert_bundle(cert_dir: Path) -> dict:
         f for f in files if _KEY_PATTERN.search(f.name) and f not in chain_candidates
     ]
     cert_candidates = [
-        f for f in files
+        f
+        for f in files
         if _CERT_PATTERN.search(f.name)
         and f not in chain_candidates
         and f not in key_candidates
@@ -105,7 +106,10 @@ def is_key_encrypted(key_path: Path) -> bool:
     """Return True if the private key requires a password to load."""
     result = subprocess.run(
         ["openssl", "rsa", "-in", str(key_path), "-noout", "-check"],
-        capture_output=True, text=True, timeout=10, stdin=subprocess.DEVNULL,
+        capture_output=True,
+        text=True,
+        timeout=10,
+        stdin=subprocess.DEVNULL,
     )
     return result.returncode != 0
 
@@ -135,17 +139,33 @@ def ensure_decrypted_key(key_path: Path, password: Optional[str]) -> Path:
     env = os.environ.copy()
     env["_ONS_KEY_PASSIN"] = password
     result = subprocess.run(
-        ["openssl", "rsa", "-in", str(key_path), "-passin", "env:_ONS_KEY_PASSIN",
-         "-out", str(decrypted_path)],
-        capture_output=True, text=True, timeout=10, env=env, stdin=subprocess.DEVNULL,
+        [
+            "openssl",
+            "rsa",
+            "-in",
+            str(key_path),
+            "-passin",
+            "env:_ONS_KEY_PASSIN",
+            "-out",
+            str(decrypted_path),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        env=env,
+        stdin=subprocess.DEVNULL,
     )
     if result.returncode != 0:
-        raise CertDiscoveryError(f"Failed to decrypt {key_path.name}: {result.stderr.strip()}")
+        raise CertDiscoveryError(
+            f"Failed to decrypt {key_path.name}: {result.stderr.strip()}"
+        )
 
     return decrypted_path
 
 
-def build_fullchain(cert_path: Path, chain_path: Optional[Path], output_path: Path) -> Path:
+def build_fullchain(
+    cert_path: Path, chain_path: Optional[Path], output_path: Path
+) -> Path:
     """Concatenate cert (+ chain, if present) into output_path and return it.
 
     Normalizes newline boundaries between PEM blocks — naively `cat`-ing
