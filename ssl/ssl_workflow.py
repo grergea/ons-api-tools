@@ -227,6 +227,48 @@ def verify_key_cert_match(cert_path: str, key_path: str) -> bool:
         return False
 
 
+def certificate_fingerprint(cert_path: str) -> dict:
+    """Return the SHA-256 fingerprint of a certificate file."""
+    try:
+        cmd = ["openssl", "x509", "-in", cert_path, "-noout", "-fingerprint", "-sha256"]
+        result = subprocess.run(cmd, capture_output=True, text=True, timeout=10)
+
+        if result.returncode != 0:
+            return {
+                "valid": False,
+                "error": f"Failed to read certificate: {result.stderr.strip()}",
+            }
+
+        # openssl prints "sha256 Fingerprint=AA:BB:..."
+        _, _, value = result.stdout.strip().partition("=")
+        if not value:
+            return {"valid": False, "error": "No fingerprint in openssl output"}
+
+        return {"valid": True, "fingerprint": value.strip().upper()}
+
+    except Exception as e:
+        return {"valid": False, "error": str(e)}
+
+
+def compare_certificate_fingerprints(cert_path_a: str, cert_path_b: str) -> dict:
+    """Compare two certificates by SHA-256 fingerprint.
+
+    Used to confirm that the certificate an edge node serves is the same
+    file that was handed over, not merely a valid one for the domain.
+    """
+    a = certificate_fingerprint(cert_path_a)
+    b = certificate_fingerprint(cert_path_b)
+
+    if not a["valid"] or not b["valid"]:
+        return {"match": False, "error": a.get("error") or b.get("error")}
+
+    return {
+        "match": a["fingerprint"] == b["fingerprint"],
+        "fingerprint_a": a["fingerprint"],
+        "fingerprint_b": b["fingerprint"],
+    }
+
+
 def validate_certificate_files(
     cert_dir: str, domain: str = None, key_password: str = None
 ) -> dict:

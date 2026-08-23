@@ -10,8 +10,11 @@ import argparse
 import json
 import os
 import sys
+import tempfile
 
 import requests
+
+from ssl_workflow import compare_certificate_fingerprints
 
 
 # --- API Configuration ---
@@ -442,6 +445,35 @@ def lookup(args: argparse.Namespace) -> None:
                     print(
                         f"  Success Rate: {staging_history[0].get('success_rate', 'N/A')}"
                     )
+
+                    local_cert = getattr(args, "local_cert", None)
+                    if local_cert:
+                        with tempfile.NamedTemporaryFile(
+                            "w", suffix=".pem", delete=False
+                        ) as served:
+                            served.write(proc.stdout)
+                            served_path = served.name
+                        try:
+                            fp = compare_certificate_fingerprints(
+                                local_cert, served_path
+                            )
+                        finally:
+                            os.unlink(served_path)
+
+                        if fp.get("error"):
+                            print(
+                                f"\n  Fingerprint Comparison: \033[91mERROR\033[0m "
+                                f"({fp['error']})"
+                            )
+                        elif fp["match"]:
+                            print("\n  Fingerprint Comparison: \033[92mMATCH\033[0m")
+                            print(f"  SHA-256: {fp['fingerprint_a']}")
+                        else:
+                            print(
+                                "\n  Fingerprint Comparison: \033[91mMISMATCH\033[0m"
+                            )
+                            print(f"  Local:  {fp['fingerprint_a']}")
+                            print(f"  Served: {fp['fingerprint_b']}")
                 else:
                     print("\033[91m[Failed to parse certificate]\033[0m")
                     if cert_proc.stderr:
@@ -725,6 +757,12 @@ Examples:
         "--verify",
         action="store_true",
         help="Perform SSL certificate verification via openssl",
+    )
+    parser_lookup.add_argument(
+        "--local-cert",
+        dest="local_cert",
+        help="Local certificate file to compare against the served certificate "
+        "by SHA-256 fingerprint (requires --verify)",
     )
     parser_lookup.set_defaults(func=lookup)
 
