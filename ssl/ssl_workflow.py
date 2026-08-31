@@ -1000,14 +1000,15 @@ def get_ons_cdn_cert_info(ssl_file_name: str, auth: dict) -> dict:
             print_warning(
                 "Staging IP not found in history, attempting DNS resolution..."
             )
+            ons_lookup_domain = f"{service_domain}.58.wskam.com"
             try:
-                resolved_ip = socket.gethostbyname(service_domain)
+                resolved_ip = socket.gethostbyname(ons_lookup_domain)
                 staging_ip = resolved_ip
-                print_success(f"Resolved {service_domain} -> {staging_ip}")
+                print_success(f"Resolved {ons_lookup_domain} -> {staging_ip}")
             except socket.gaierror:
                 return {
                     "success": False,
-                    "error": f"Could not resolve domain: {service_domain}",
+                    "error": f"Could not resolve domain: {ons_lookup_domain}",
                 }
 
         # Use shell pipe to get certificate directly
