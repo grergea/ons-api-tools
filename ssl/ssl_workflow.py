@@ -562,11 +562,18 @@ def get_auth_params(id: str = None, api_key: str = None) -> dict:
     return {"id": id or DEFAULT_AUTH["id"], "api_key": key}
 
 
-def lookup_cert(ssl_file_name: str, auth: dict, verify: bool = False) -> dict:
+def lookup_cert(
+    ssl_file_name: str,
+    auth: dict,
+    verify: bool = False,
+    local_cert: Optional[str] = None,
+) -> dict:
     """Lookup certificate information."""
     cmd = ["lookup", *_auth_args(auth), "--ssl-file-name", ssl_file_name]
     if verify:
         cmd.append("--verify")
+        if local_cert:
+            cmd.extend(["--local-cert", local_cert])
 
     result = run_manager_command(cmd)
 
@@ -584,6 +591,68 @@ def lookup_cert(ssl_file_name: str, auth: dict, verify: bool = False) -> dict:
                     break
 
     return {"found": True, "staging_ip": staging_ip, "raw": result.get("raw", "")}
+
+
+_STAGED_CERT_MAX_ATTEMPTS = 6
+_STAGED_CERT_WAIT_SECONDS = 10
+_ANSI_ESCAPE = re.compile(r"\033\[[0-9;]*m")
+_FINGERPRINT_MATCH = re.compile(r"Fingerprint Comparison:\s*MATCH\b")
+
+
+def wait_for_staged_cert(ssl_file_name: str, auth: dict, local_cert: str) -> dict:
+    """Poll the staging node until it serves the certificate just uploaded.
+
+    Right after staging-deploy/staging-update the node can still serve the
+    previous certificate, so an expiry check on whatever it serves says
+    nothing about the new file. Matching by SHA-256 fingerprint against the
+    local file tells us the check ran against the right certificate.
+    """
+    lookup_result = {"found": False, "staging_ip": None}
+    for attempt in range(1, _STAGED_CERT_MAX_ATTEMPTS + 1):
+        lookup_result = lookup_cert(
+            ssl_file_name, auth, verify=True, local_cert=local_cert
+        )
+        if not lookup_result["found"]:
+            return {**lookup_result, "matched": False, "verifiable": True}
+
+        # No staging node (already deployed or never staged): nothing to wait for
+        if lookup_result.get("staging_ip") in (None, "", "N/A"):
+            return {**lookup_result, "matched": False, "verifiable": False}
+
+        raw = _ANSI_ESCAPE.sub("", lookup_result.get("raw", ""))
+        if _FINGERPRINT_MATCH.search(raw):
+            return {**lookup_result, "matched": True, "verifiable": True}
+
+        if attempt < _STAGED_CERT_MAX_ATTEMPTS:
+            print_warning(
+                f"Staging node not serving the new certificate yet (attempt "
+                f"{attempt}/{_STAGED_CERT_MAX_ATTEMPTS}), retrying in "
+                f"{_STAGED_CERT_WAIT_SECONDS}s"
+            )
+            time.sleep(_STAGED_CERT_WAIT_SECONDS)
+
+    return {**lookup_result, "matched": False, "verifiable": True}
+
+
+def verify_staged_cert(ssl_file_name: str, auth: dict, ssl_cert: str) -> dict:
+    """Workflow step 2: confirm the staged certificate and warn on expiry."""
+    lookup_result = wait_for_staged_cert(ssl_file_name, auth, ssl_cert)
+    if not lookup_result["found"]:
+        print_error("Failed to lookup certificate")
+        return {"success": False, "step": 2}
+
+    if lookup_result["matched"]:
+        _warn_cert_expiry(lookup_result.get("raw", ""))
+    elif not lookup_result["verifiable"]:
+        print_warning("No staging node to verify against; skipped served-cert check")
+    else:
+        print_warning(
+            "Staging node still serves a different certificate than the "
+            "uploaded file (fingerprint mismatch). Expiry shown above belongs "
+            "to that certificate. Re-run 'lookup --verify --local-cert' "
+            "before final deploy"
+        )
+    return {"success": True}
 
 
 # --- Workflow Functions ---
@@ -644,12 +713,9 @@ def workflow_new_cert(
     else:
         print_step(2, steps, "Verifying certificate on staging")
 
-        lookup_result = lookup_cert(ssl_file_name, auth, verify=True)
-        if not lookup_result["found"]:
-            print_error("Failed to lookup certificate")
-            return {"success": False, "step": 2}
-
-        _warn_cert_expiry(lookup_result.get("raw", ""))
+        verify_result = verify_staged_cert(ssl_file_name, auth, ssl_cert)
+        if not verify_result["success"]:
+            return verify_result
 
     # Step 3: Final Deploy
     if auto_deploy:
@@ -723,12 +789,9 @@ def workflow_renew_cert(
     else:
         print_step(2, steps, "Verifying certificate on staging")
 
-        lookup_result = lookup_cert(ssl_file_name, auth, verify=True)
-        if not lookup_result["found"]:
-            print_error("Failed to lookup certificate")
-            return {"success": False, "step": 2}
-
-        _warn_cert_expiry(lookup_result.get("raw", ""))
+        verify_result = verify_staged_cert(ssl_file_name, auth, ssl_cert)
+        if not verify_result["success"]:
+            return verify_result
 
     # Step 3: Final Deploy
     if auto_deploy:
