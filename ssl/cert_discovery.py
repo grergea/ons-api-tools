@@ -23,6 +23,7 @@ _CHAIN_PATTERN = re.compile(r"chain", re.IGNORECASE)
 _KEY_PATTERN = re.compile(r"key", re.IGNORECASE)
 _NOPASS_KEY_PATTERN = re.compile(r"^nopass.*key", re.IGNORECASE)
 _CERT_PATTERN = re.compile(r"cert|\.(crt|cer|pem)$", re.IGNORECASE)
+_BUNDLE_PATTERN = re.compile(r"\.all\.", re.IGNORECASE)
 
 
 class CertDiscoveryError(Exception):
@@ -57,27 +58,93 @@ def _relevant_files(cert_dir: Path) -> list:
     return files
 
 
+def _has_cert_material(cert_dir: Path) -> bool:
+    """True if cert_dir itself holds anything that looks like cert/key/chain."""
+    return any(
+        _CERT_PATTERN.search(f.name)
+        or _KEY_PATTERN.search(f.name)
+        or _CHAIN_PATTERN.search(f.name)
+        for f in _relevant_files(cert_dir)
+    )
+
+
+def _candidate_subdirs(cert_dir: Path) -> list:
+    """Immediate subfolders worth searching (no hidden dirs or __MACOSX)."""
+    return sorted(
+        p
+        for p in cert_dir.iterdir()
+        if p.is_dir() and not p.name.startswith(".") and p.name != "__MACOSX"
+    )
+
+
 def discover_cert_bundle(cert_dir: Path) -> dict:
     """Auto-detect cert/key/chain files with vendor-arbitrary names.
 
-    Returns {"cert": Path, "key": Path, "chain": Path | None}. Raises
-    CertDiscoveryError if the cert or key candidate is missing or
-    ambiguous (zero or multiple matches). A chain file is optional.
+    Returns {"cert": Path, "key": Path, "chain": Path | None,
+    "bundle": Path | None}. Raises CertDiscoveryError if the cert or key
+    candidate is missing or ambiguous (zero or multiple matches). A chain
+    file is optional. "bundle" is a vendor-supplied cert+chain file
+    (`*.all.*`) delivered next to the single leaf cert.
+
+    If cert_dir holds no cert/key/chain files at all (e.g. an extra folder
+    level left by unzipping the vendor archive), looks one level down and
+    uses the single subfolder where discovery succeeds. Subfolders such as
+    Convert/ or RootChain/ never qualify since they lack a cert+key pair.
     """
+    try:
+        return _discover_in_dir(cert_dir)
+    except CertDiscoveryError as top_level_error:
+        if _has_cert_material(cert_dir):
+            raise
+
+        found = []
+        for sub in _candidate_subdirs(cert_dir):
+            try:
+                found.append(_discover_in_dir(sub))
+            except CertDiscoveryError:
+                continue
+
+        if len(found) == 1:
+            return found[0]
+        if len(found) > 1:
+            names = [b["cert"].parent.name for b in found]
+            raise CertDiscoveryError(
+                f"Found certificate files in multiple subfolders of {cert_dir}: "
+                f"{names}. Pass --cert-dir to pick one."
+            )
+        raise top_level_error
+
+
+def _discover_in_dir(cert_dir: Path) -> dict:
+    """Discover cert/key/chain files directly inside cert_dir."""
     files = _relevant_files(cert_dir)
 
     chain_candidates = [f for f in files if _CHAIN_PATTERN.search(f.name)]
-    nopass_key_candidates = [f for f in files if _NOPASS_KEY_PATTERN.search(f.name)]
-    key_candidates = nopass_key_candidates or [
+    all_key_files = [
         f for f in files if _KEY_PATTERN.search(f.name) and f not in chain_candidates
     ]
-    cert_candidates = [
+    nopass_key_candidates = [f for f in files if _NOPASS_KEY_PATTERN.search(f.name)]
+    key_candidates = nopass_key_candidates or all_key_files
+    # Every key file is excluded here, not only the selected one: a plain
+    # `*_key.pem` next to a `nopass_*` key would otherwise match `.pem$`.
+    cert_files = [
         f
         for f in files
         if _CERT_PATTERN.search(f.name)
         and f not in chain_candidates
-        and f not in key_candidates
+        and f not in all_key_files
+        and f not in nopass_key_candidates
     ]
+    bundle_files = [f for f in cert_files if _BUNDLE_PATTERN.search(f.name)]
+    cert_candidates = [f for f in cert_files if f not in bundle_files]
+    bundle = None
+
+    if len(cert_candidates) == 1 and len(bundle_files) <= 1:
+        bundle = bundle_files[0] if bundle_files else None
+    elif not cert_candidates and len(bundle_files) == 1:
+        cert_candidates = bundle_files
+    else:
+        cert_candidates = cert_files
 
     if len(cert_candidates) != 1:
         raise CertDiscoveryError(
@@ -99,6 +166,7 @@ def discover_cert_bundle(cert_dir: Path) -> dict:
         "cert": cert_candidates[0],
         "key": key_candidates[0],
         "chain": chain_candidates[0] if chain_candidates else None,
+        "bundle": bundle,
     }
 
 
@@ -184,15 +252,20 @@ def get_cert_bundle(cert_dir: Path, key_password: Optional[str] = None) -> dict:
 
     Returns {"cert": Path, "key": Path, "chain": Path | None,
     "fullchain": Path}. Uses an existing fullchain.pem if present;
-    otherwise builds one from the discovered cert + chain. Decrypts the
-    private key if needed.
+    otherwise builds one from the vendor's cert+chain bundle if there is
+    one, else from the discovered cert + chain. Decrypts the private key
+    if needed.
     """
     bundle = discover_cert_bundle(cert_dir)
     key_path = ensure_decrypted_key(bundle["key"], key_password)
 
-    fullchain_path = cert_dir / "fullchain.pem"
+    # Next to the discovered files, which may be one folder below cert_dir
+    fullchain_path = bundle["cert"].parent / "fullchain.pem"
     if not fullchain_path.exists():
-        build_fullchain(bundle["cert"], bundle["chain"], fullchain_path)
+        if bundle["bundle"]:
+            build_fullchain(bundle["bundle"], None, fullchain_path)
+        else:
+            build_fullchain(bundle["cert"], bundle["chain"], fullchain_path)
 
     return {
         "cert": bundle["cert"],
