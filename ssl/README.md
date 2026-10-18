@@ -18,7 +18,7 @@ pip install requests
 
 ```bash
 export ONS_API_KEY="<User Portal에서 발급받은 API 키>"
-export ONS_API_ID="<account-id>"   # 기본값, 생략 가능
+export ONS_API_ID="<User Portal 계정 ID>"
 ```
 
 두 스크립트 모두 `--id`/`--api-key` 플래그로 override 가능합니다. 암호화된 개인키를 다루는 경우:
@@ -76,7 +76,7 @@ python3 ssl_workflow.py list --domain example.com
 
 | 옵션 | 설명 | 기본값 |
 |------|------|--------|
-| `--id` | Account ID | `<account-id>` |
+| `--id` | Account ID | (env `ONS_API_ID`) |
 | `--api-key` | API Key | (env `ONS_API_KEY`) |
 | `--skip-verify` | 검증 단계 건너뜀 | false |
 | `--no-auto-deploy` | 최종 배포 건너뜀 | false |

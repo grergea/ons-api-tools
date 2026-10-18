@@ -26,9 +26,9 @@ from cert_discovery import CertDiscoveryError, get_cert_bundle, resolve_cert_dir
 
 
 # --- Configuration ---
-# API key must come from the environment (never hardcode: public repository)
+# Account ID and API key must come from the environment (never hardcode: public repository)
 DEFAULT_AUTH = {
-    "id": os.environ.get("ONS_API_ID", "<account-id>"),
+    "id": os.environ.get("ONS_API_ID", ""),
     "api_key": os.environ.get("ONS_API_KEY", ""),
 }
 
@@ -559,7 +559,13 @@ def get_auth_params(id: str = None, api_key: str = None) -> dict:
             "API key not set. Set the ONS_API_KEY environment variable or pass --api-key."
         )
         sys.exit(1)
-    return {"id": id or DEFAULT_AUTH["id"], "api_key": key}
+    account_id = id or DEFAULT_AUTH["id"]
+    if not account_id:
+        print_error(
+            "Account ID not set. Set the ONS_API_ID environment variable or pass --id."
+        )
+        sys.exit(1)
+    return {"id": account_id, "api_key": key}
 
 
 def lookup_cert(
@@ -1367,7 +1373,7 @@ Examples:
 
     # Common auth arguments
     auth_parser = argparse.ArgumentParser(add_help=False)
-    auth_parser.add_argument("--id", help="Account ID (default: <account-id>)")
+    auth_parser.add_argument("--id", help="Account ID (default: env ONS_API_ID)")
     auth_parser.add_argument("--api-key", dest="api_key", help="API Key")
 
     # --- new command ---

@@ -1194,7 +1194,7 @@ ONS CDN SSL 인증서를 조회·등록·갱신하는 스킬입니다. `ssl_work
 
 ```bash
 export ONS_API_KEY="<User Portal에서 발급받은 API 키>"
-export ONS_API_ID="<account-id>"   # 기본값, 생략 가능
+export ONS_API_ID="<User Portal 계정 ID>"
 ```
 
 암호화된 개인키를 다루는 경우:
@@ -1227,7 +1227,7 @@ export ONS_SSL_KEY_PASSWORD="<키 암호>"   # 또는 --ssl-key-password 로 매
 ## 롤백
 
 ```bash
-python3 ssl_api_manager.py staging-cancel --id <account-id> --api-key $ONS_API_KEY --ssl-file-name <이름>
+python3 ssl_api_manager.py staging-cancel --id $ONS_API_ID --api-key $ONS_API_KEY --ssl-file-name <이름>
 ```
 
 ## 관련 문서
