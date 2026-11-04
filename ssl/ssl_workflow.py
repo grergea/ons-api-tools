@@ -492,13 +492,26 @@ def print_certificate_info(
     print(f"{'=' * 60}")
 
 
+_SECRET_FLAGS = {"--api-key", "--password", "--ssl-key-password"}
+
+
+def _mask_secrets(command: list) -> list:
+    """Replace the value that follows a secret flag so logs never show it."""
+    masked = []
+    hide_next = False
+    for token in command:
+        masked.append("****" if hide_next else token)
+        hide_next = token in _SECRET_FLAGS
+    return masked
+
+
 def run_manager_command(command: list) -> dict:
     """Run ssl_api_manager.py command and return parsed JSON response."""
     cmd = ["python3", str(MANAGER_SCRIPT)] + command
     result = subprocess.run(cmd, capture_output=True, text=True)
 
     if result.returncode != 0:
-        print_error(f"Command failed: {' '.join(command)}")
+        print_error(f"Command failed: {' '.join(_mask_secrets(command))}")
         print_error(result.stderr)
         return {"success": False, "error": result.stderr}
 

@@ -11,6 +11,7 @@ import json
 import os
 import sys
 import tempfile
+import time
 
 import requests
 
@@ -19,6 +20,7 @@ from ssl_workflow import compare_certificate_fingerprints
 
 # --- API Configuration ---
 BASE_URL = "https://openapi.onscdn.com/cdnservice/ssl"
+DOMAIN_BASE_URL = "https://openapi.onscdn.com/cdnservice/domain"
 API_URLS = {
     "staging_deploy": f"{BASE_URL}/staging/deploy",
     "staging_update": f"{BASE_URL}/staging/update",
@@ -26,7 +28,20 @@ API_URLS = {
     "staging_cancel": f"{BASE_URL}/staging/cancel",
     "history": f"{BASE_URL}/history",
     "list": f"{BASE_URL}/list",
+    "https_staging": f"{DOMAIN_BASE_URL}/staging/https/settings",
+    "https_deploy": f"{DOMAIN_BASE_URL}/https/settings",
+    "https_cancel": f"{DOMAIN_BASE_URL}/staging/https/cancel",
+    "domain_info": "https://openapi.onscdn.com/cdnservice/domains/info",
 }
+
+# HTTPS final deploy is rejected with this message right after staging; calling
+# it again without cancelling succeeds once staging has settled.
+HTTPS_STAGING_NOT_READY = "staging config status is not success"
+DEFAULT_MAX_ATTEMPTS = 6
+DEFAULT_RETRY_INTERVAL = 20
+# The certificate link shows up in the list ~5s after the certificate final deploy.
+DEFAULT_CERT_CHECK_ATTEMPTS = 6
+DEFAULT_CERT_CHECK_INTERVAL = 5
 
 
 # --- Helper Functions ---
@@ -141,6 +156,7 @@ def staging_update(args: argparse.Namespace) -> None:
             data["add_domain_list"] = args.add_domain_list
         if args.del_domain_list:
             data["del_domain_list"] = args.del_domain_list
+            _warn_if_https_on(args, args.del_domain_list)
         if args.memo:
             data["memo"] = args.memo
         if args.ssl_key_password:
@@ -170,12 +186,19 @@ def staging_update(args: argparse.Namespace) -> None:
                 )
                 sys.exit(1)
 
-            response = requests.post(
-                API_URLS["staging_update"],
-                data=data,
-                files=files if files else None,
-                timeout=60,
-            )
+            if files:
+                response = requests.post(
+                    API_URLS["staging_update"],
+                    data=data,
+                    files=files,
+                    timeout=60,
+                )
+            else:
+                # Domain-only changes still need multipart/form-data (urlencoded gets 415)
+                multipart = {key: (None, value) for key, value in data.items()}
+                response = requests.post(
+                    API_URLS["staging_update"], files=multipart, timeout=60
+                )
             handle_response(response)
 
         finally:
@@ -219,6 +242,160 @@ def staging_cancel(args: argparse.Namespace) -> None:
     except ValueError as e:
         print(f"Error: {e}", file=sys.stderr)
         sys.exit(1)
+
+
+def _domain_form_files(args: argparse.Namespace, **fields: str) -> dict:
+    """Build the multipart form-data fields for the domain HTTPS settings APIs."""
+    data = get_form_auth_params(args)
+    data["domain"] = args.domain
+    data.update(fields)
+    return {key: (None, value) for key, value in data.items()}
+
+
+def _post_domain_form(url: str, args: argparse.Namespace, **fields: str) -> None:
+    """POST multipart form-data for the domain HTTPS settings APIs."""
+    try:
+        files = _domain_form_files(args, **fields)
+
+        response = requests.post(url, files=files, timeout=60)
+        handle_response(response)
+
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+
+def _domain_has_certificate(auth_params: dict, domain: str) -> bool | None:
+    """Return whether a certificate is linked to the domain, None if unknown."""
+    try:
+        domains = []
+        seen = 0
+        page = 1
+        while True:
+            api_response = _fetch_ssl_list_page(auth_params, page).get(
+                "api_response", {}
+            )
+            if api_response.get("result_code") != "200":
+                return None
+            list_data = api_response.get("data", {})
+            items = list_data.get("ssl_list", [])
+            for cert in items:
+                domains.extend(cert.get("domain_list", []))
+            seen += len(items)
+            if not items or seen >= list_data.get("total_count", 0):
+                break
+            page += 1
+        return domain in domains
+    except (requests.exceptions.RequestException, ValueError):
+        return None
+
+
+def _warn_if_https_on(args: argparse.Namespace, domain_list: str) -> None:
+    """Warn when a certificate is released from a domain that still has HTTPS ON.
+
+    Releasing only removes the console reference, so the server keeps serving the
+    certificate until HTTPS is turned OFF. Lookup failures are ignored.
+    """
+    try:
+        auth_params = get_json_auth_params(args)
+        for domain in (d.strip() for d in domain_list.split(",") if d.strip()):
+            response = requests.get(
+                API_URLS["domain_info"],
+                params={**auth_params, "domain": domain},
+                timeout=60,
+            )
+            info = response.json().get("api_response", {}).get("data", {})
+            if info.get("https_enabled") is True:
+                print(
+                    f"Warning: HTTPS is ON for {domain}. Releasing the certificate "
+                    "first leaves the server serving it; turn HTTPS OFF "
+                    "(https-staging, https-deploy) before releasing.",
+                    file=sys.stderr,
+                )
+    except (requests.exceptions.RequestException, ValueError, AttributeError):
+        pass
+
+
+def https_staging(args: argparse.Namespace) -> None:
+    """Stage a domain HTTPS/HTTP2 ON/OFF change.
+
+    HTTPS ON fails with 'SSL mapping not found' until the certificate link is
+    reflected, which takes a few seconds after the certificate final deploy. Wait
+    for the link to show up in the certificate list before staging.
+    """
+    if args.https == "on" and not getattr(args, "skip_cert_check", False):
+        max_attempts = getattr(args, "max_attempts", DEFAULT_CERT_CHECK_ATTEMPTS)
+        interval = getattr(args, "retry_interval", DEFAULT_CERT_CHECK_INTERVAL)
+        try:
+            auth_params = get_json_auth_params(args)
+        except ValueError as e:
+            print(f"Error: {e}", file=sys.stderr)
+            sys.exit(1)
+        linked = None
+        for attempt in range(1, max_attempts + 1):
+            linked = _domain_has_certificate(auth_params, args.domain)
+            if linked is not False:
+                break
+            if attempt < max_attempts:
+                print(
+                    f"No certificate linked to {args.domain} yet "
+                    f"(attempt {attempt}/{max_attempts}), retrying in {interval}s",
+                    file=sys.stderr,
+                )
+                time.sleep(interval)
+        if linked is False:
+            print(
+                f"Error: no certificate is linked to {args.domain}. HTTPS ON would "
+                "fail with 'SSL mapping not found'. Link a certificate first "
+                "(or pass --skip-cert-check).",
+                file=sys.stderr,
+            )
+            sys.exit(1)
+    _post_domain_form(
+        API_URLS["https_staging"], args, https=args.https, http2=args.http2
+    )
+
+
+def _is_https_staging_not_ready(response: requests.Response) -> bool:
+    """Return whether the response is the 'staging not settled yet' rejection."""
+    try:
+        message = response.json()["api_response"]["result_msg"]
+    except (KeyError, TypeError, ValueError):
+        return False
+    return isinstance(message, str) and HTTPS_STAGING_NOT_READY in message
+
+
+def https_deploy(args: argparse.Namespace) -> None:
+    """Finalize a staged domain HTTPS/HTTP2 ON/OFF change.
+
+    Retries without cancelling while the final deploy is rejected because the
+    staging has not settled yet.
+    """
+    max_attempts = getattr(args, "max_attempts", DEFAULT_MAX_ATTEMPTS)
+    interval = getattr(args, "retry_interval", DEFAULT_RETRY_INTERVAL)
+    try:
+        files = _domain_form_files(args)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
+
+    for attempt in range(1, max_attempts + 1):
+        response = requests.post(API_URLS["https_deploy"], files=files, timeout=60)
+        if attempt < max_attempts and _is_https_staging_not_ready(response):
+            print(
+                f"HTTPS staging not settled yet (attempt {attempt}/{max_attempts}), "
+                f"retrying in {interval}s",
+                file=sys.stderr,
+            )
+            time.sleep(interval)
+            continue
+        break
+    handle_response(response)
+
+
+def https_cancel(args: argparse.Namespace) -> None:
+    """Cancel a staged domain HTTPS/HTTP2 ON/OFF change."""
+    _post_domain_form(API_URLS["https_cancel"], args)
 
 
 def history(args: argparse.Namespace) -> None:
@@ -469,9 +646,7 @@ def lookup(args: argparse.Namespace) -> None:
                             print("\n  Fingerprint Comparison: \033[92mMATCH\033[0m")
                             print(f"  SHA-256: {fp['fingerprint_a']}")
                         else:
-                            print(
-                                "\n  Fingerprint Comparison: \033[91mMISMATCH\033[0m"
-                            )
+                            print("\n  Fingerprint Comparison: \033[91mMISMATCH\033[0m")
                             print(f"  Local:  {fp['fingerprint_a']}")
                             print(f"  Served: {fp['fingerprint_b']}")
                 else:
@@ -777,6 +952,66 @@ Examples:
         help="Filter results to certificates whose domain_list contains this substring",
     )
     parser_list.set_defaults(func=list_certs)
+
+    # --- https-staging / https-deploy / https-cancel commands ---
+    parser_https_staging = subparsers.add_parser(
+        "https-staging",
+        help="Stage a domain HTTPS/HTTP2 ON/OFF change",
+        parents=[auth_parser],
+    )
+    parser_https_staging.add_argument("--domain", required=True, help="Target domain")
+    parser_https_staging.add_argument(
+        "--https", required=True, choices=["on", "off"], help="HTTPS (listen 443)"
+    )
+    parser_https_staging.add_argument(
+        "--http2", required=True, choices=["on", "off"], help="HTTP/2"
+    )
+    parser_https_staging.add_argument(
+        "--skip-cert-check",
+        action="store_true",
+        help="HTTPS ON 전 인증서 연결 확인을 건너뜀",
+    )
+    parser_https_staging.add_argument(
+        "--max-attempts",
+        type=int,
+        default=DEFAULT_CERT_CHECK_ATTEMPTS,
+        help="인증서 연결이 목록에 나타나길 기다리는 최대 확인 횟수 (default: %(default)s)",
+    )
+    parser_https_staging.add_argument(
+        "--retry-interval",
+        type=int,
+        default=DEFAULT_CERT_CHECK_INTERVAL,
+        help="확인 간격(초) (default: %(default)s)",
+    )
+    parser_https_staging.set_defaults(func=https_staging)
+
+    parser_https_deploy = subparsers.add_parser(
+        "https-deploy",
+        help="Finalize a staged domain HTTPS/HTTP2 change",
+        parents=[auth_parser],
+    )
+    parser_https_deploy.add_argument("--domain", required=True, help="Target domain")
+    parser_https_deploy.add_argument(
+        "--max-attempts",
+        type=int,
+        default=DEFAULT_MAX_ATTEMPTS,
+        help="Staging 직후 거부될 때 최종 배포 호출 최대 횟수 (default: %(default)s)",
+    )
+    parser_https_deploy.add_argument(
+        "--retry-interval",
+        type=int,
+        default=DEFAULT_RETRY_INTERVAL,
+        help="재시도 간격(초) (default: %(default)s)",
+    )
+    parser_https_deploy.set_defaults(func=https_deploy)
+
+    parser_https_cancel = subparsers.add_parser(
+        "https-cancel",
+        help="Cancel a staged domain HTTPS/HTTP2 change",
+        parents=[auth_parser],
+    )
+    parser_https_cancel.add_argument("--domain", required=True, help="Target domain")
+    parser_https_cancel.set_defaults(func=https_cancel)
 
     return parser
 
