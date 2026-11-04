@@ -177,43 +177,74 @@ class ReleaseWhileHttpsOnTests(unittest.TestCase):
         defaults.update(kwargs)
         return _ns(**defaults)
 
-    @mock.patch.object(mgr, "handle_response")
-    @mock.patch.object(mgr.requests, "post")
-    @mock.patch.object(mgr.requests, "get")
-    def test_warns_when_https_is_on(self, get, post, _handle):
-        get.return_value = _response(
-            {"api_response": {"result_code": "200", "data": {"https_enabled": True}}}
+    def _route(self, https_enabled):
+        """requests.post stub: domain info lookup vs. the staging-update call."""
+        info = _response(
+            {
+                "api_response": {
+                    "result_code": "200",
+                    "data": {"https_enabled": https_enabled},
+                }
+            }
         )
+
+        def post(url, **kwargs):
+            return info if url == mgr.API_URLS["domain_info"] else _response(OK)
+
+        return post
+
+    @mock.patch.object(mgr, "handle_response")
+    @mock.patch.object(mgr.requests, "get")
+    @mock.patch.object(mgr.requests, "post")
+    def test_warns_when_https_is_on(self, post, get, _handle):
+        post.side_effect = self._route(True)
 
         with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             mgr.staging_update(self._args())
 
         self.assertIn("a.example.com", err.getvalue())
         self.assertIn("HTTPS is ON", err.getvalue())
-        post.assert_called_once()
+        get.assert_not_called()
+
+    @mock.patch.object(mgr, "handle_response")
+    @mock.patch.object(mgr.requests, "get")
+    @mock.patch.object(mgr.requests, "post")
+    def test_lookup_keeps_credentials_out_of_the_url(self, post, get, _handle):
+        post.side_effect = self._route(False)
+
+        mgr.staging_update(self._args())
+
+        lookup = next(
+            c for c in post.call_args_list if c.args[0] == mgr.API_URLS["domain_info"]
+        )
+        self.assertNotIn("params", lookup.kwargs)
+        common = lookup.kwargs["json"]["api_request"]["common"]
+        self.assertEqual(common["cloud_key_value"], "KEY")
+        self.assertEqual(
+            lookup.kwargs["json"]["api_request"]["data"], {"domain": "a.example.com"}
+        )
+        get.assert_not_called()
 
     @mock.patch.object(mgr, "handle_response")
     @mock.patch.object(mgr.requests, "post")
-    @mock.patch.object(mgr.requests, "get")
-    def test_silent_when_https_is_off(self, get, post, _handle):
-        get.return_value = _response(
-            {"api_response": {"result_code": "200", "data": {"https_enabled": False}}}
-        )
+    def test_silent_when_https_is_off(self, post, _handle):
+        post.side_effect = self._route(False)
 
         with mock.patch("sys.stderr", new_callable=io.StringIO) as err:
             mgr.staging_update(self._args())
 
         self.assertEqual(err.getvalue(), "")
-        post.assert_called_once()
 
     @mock.patch.object(mgr, "handle_response")
     @mock.patch.object(mgr.requests, "post")
-    @mock.patch.object(mgr.requests, "get")
-    def test_no_lookup_when_nothing_is_released(self, get, post, _handle):
+    def test_no_lookup_when_nothing_is_released(self, post, _handle):
+        post.side_effect = self._route(True)
+
         mgr.staging_update(self._args(del_domain_list=None, add_domain_list="b.com"))
 
-        get.assert_not_called()
-        post.assert_called_once()
+        urls = [c.args[0] for c in post.call_args_list]
+        self.assertNotIn(mgr.API_URLS["domain_info"], urls)
+        self.assertEqual(len(urls), 1)
 
 
 if __name__ == "__main__":

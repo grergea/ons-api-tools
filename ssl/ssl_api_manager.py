@@ -295,13 +295,18 @@ def _warn_if_https_on(args: argparse.Namespace, domain_list: str) -> None:
 
     Releasing only removes the console reference, so the server keeps serving the
     certificate until HTTPS is turned OFF. Lookup failures are ignored.
+    Credentials go in the JSON body, never in the URL query string.
     """
     try:
         auth_params = get_json_auth_params(args)
         for domain in (d.strip() for d in domain_list.split(",") if d.strip()):
-            response = requests.get(
+            payload = {
+                "api_request": {"common": auth_params, "data": {"domain": domain}}
+            }
+            response = requests.post(
                 API_URLS["domain_info"],
-                params={**auth_params, "domain": domain},
+                json=payload,
+                headers={"Content-Type": "application/json"},
                 timeout=60,
             )
             info = response.json().get("api_response", {}).get("data", {})
