@@ -98,6 +98,7 @@ Staging 배포를 취소하려면 `ssl_api_manager.py`의 `staging-cancel`을 �
 - **history**: 인증서 배포 이력 조회
 - **lookup**: Staging 서버에서 인증서 정보 조회 (openssl 검증 포함, `--verify`)
 - **list**: 등록된 전체 SSL 인증서 목록 조회 (`--domain`으로 필터링)
+- **https-staging / https-deploy / https-cancel**: 도메인 HTTPS/HTTP2 ON/OFF 설정의 Staging, 최종 배포, 취소
 
 ### Usage Examples
 
@@ -150,6 +151,18 @@ python ssl_api_manager.py list \
     --id <USER_ID> \
     --api-key <API_KEY> \
     --domain example.com
+
+# 도메인 HTTPS/HTTP2 ON/OFF (Staging → 최종 배포)
+python ssl_api_manager.py https-staging \
+    --id <USER_ID> \
+    --api-key <API_KEY> \
+    --domain example.com \
+    --https off \
+    --http2 off
+python ssl_api_manager.py https-deploy \
+    --id <USER_ID> \
+    --api-key <API_KEY> \
+    --domain example.com
 ```
 
 ### Options Reference
@@ -175,6 +188,10 @@ python ssl_api_manager.py list \
 | lookup | `--ssl-file-name` | O | 조회할 인증서 파일명 |
 | lookup | `--verify` | - | openssl 기반 인증서 검증 수행 |
 | list | `--domain` | - | 도메인 부분 일치로 결과 필터링 |
+| https-staging | `--domain` | O | 대상 도메인 |
+| https-staging | `--https` | O | `on` 또는 `off` |
+| https-staging | `--http2` | O | `on` 또는 `off` |
+| https-deploy, https-cancel | `--domain` | O | 대상 도메인 |
 
 ### Response Example
 
@@ -201,6 +218,38 @@ python ssl_api_manager.py list \
 | 400 | - | 잘못된 요청 파라미터 |
 | 401 | - | 인증 실패 |
 | 500 | - | 서버 내부 오류 |
+
+## Certificate and HTTPS Order
+
+HTTPS ON/OFF와 인증서 연결/해제는 순서가 결과를 결정합니다. 시나리오별 흐름도는 [docs/cert-https-order_ko.html](docs/cert-https-order_ko.html)을 내려받아 브라우저에서 엽니다.
+
+- 켤 때: 인증서 연결 → HTTPS ON
+- 끌 때: HTTPS OFF → 인증서 해제
+
+### Scenarios
+
+- 신규 등록 후 활성화 (인증서 연결 → HTTPS ON, 정상 순서): 연결된 인증서가 없는 도메인에 HTTPS ON을 배포하면 `SSL mapping not found`가 나므로 연결이 먼저입니다. 연결만으로는 HTTPS가 ON이 되지 않고 443은 기본 인증서를 응답합니다.
+- HTTPS OFF만 (HTTPS OFF, 인증서 연결 유지, 정상 순서): 443은 기본 인증서를 응답하고, 다시 ON 하면 연결된 인증서로 응답합니다.
+- 완전한 해제 (HTTPS OFF → 인증서 해제, 정상 순서): 다시 켜려면 인증서를 새로 연결해야 합니다.
+- 인증서 해제만 (인증서 해제 → HTTPS ON 유지, 잘못된 순서): 인증서 목록에서 도메인은 사라지지만 `https_enabled`는 true로 남고 443은 해제한 인증서를 계속 응답합니다. 이후 HTTPS를 OFF하면 기본 인증서로 돌아갑니다.
+
+### Notes for Automation
+
+- 인증서 연결/해제와 HTTPS ON/OFF는 각각 Staging과 최종 배포의 2단계입니다.
+- 인증서 최종 배포가 200이어도 연결이 반영되기까지 약 5초가 걸립니다. 그 사이에 HTTPS ON을 Staging하면 `SSL mapping not found`(E500)가 납니다.
+- HTTPS Staging 직후 최종 배포는 `staging config status is not success`(A404)로 한 번 거부될 수 있습니다. 취소 없이 20초쯤 뒤 다시 호출하면 통과합니다.
+- 인증서 최종 배포도 Staging 직후에는 `Pre-deployment has not been completed`로 거부될 수 있어, `ssl_workflow.py`는 20초 간격으로 최대 6회 재시도합니다.
+- HTTPS 최종 배포가 200이어도 `https_enabled`는 약 20초 뒤에 true로 바뀝니다. 그 사이에도 엣지는 이미 인증서를 응답합니다.
+- Staging이 걸린 상태에서 다시 Staging하면 `It is already pre-deployed`(E500)입니다. 다시 하려면 먼저 취소합니다. 취소해도 `https_enabled`, 443 응답, 인증서 연결은 이전 그대로입니다.
+- Staging이 없을 때 취소나 최종 배포를 호출하면 `has no staging config history`(A404)가 나옵니다. 취소 후에도 도메인 이력의 마지막 항목은 `pre-deploy`로 남아, 이력만으로는 대기 여부를 알 수 없습니다.
+
+### CLI Guards
+
+`ssl_api_manager.py`는 위 동작을 다음과 같이 처리합니다.
+
+- `https-staging --https on`: 인증서 목록에 도메인 연결이 나타날 때까지 기다린 뒤 호출합니다(`--max-attempts` 기본 6, `--retry-interval` 기본 5초). 끝까지 연결이 없으면 `SSL mapping not found`를 미리 알리고 중단하며, `--skip-cert-check`로 건너뛸 수 있습니다.
+- `https-deploy`: `staging config status is not success`로 거부되면 취소 없이 다시 호출합니다(`--max-attempts` 기본 6, `--retry-interval` 기본 20초).
+- `staging-update --del-domain-list`: 해제 대상 도메인의 HTTPS가 ON이면 경고를 출력합니다. 경고만 하고 요청은 그대로 진행합니다.
 
 ## cert_discovery.py (내부 헬퍼 모듈)
 
