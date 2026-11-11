@@ -671,7 +671,7 @@ def verify_staged_cert(ssl_file_name: str, auth: dict, ssl_cert: str) -> dict:
             "to that certificate. Re-run 'lookup --verify --local-cert' "
             "before final deploy"
         )
-    return {"success": True}
+    return {"success": True, "staging_ip": lookup_result.get("staging_ip")}
 
 
 # --- Workflow Functions ---
@@ -727,6 +727,7 @@ def workflow_new_cert(
     ssl_file_name = api_resp.get("data", {}).get("ssl_file_name", ssl_file_name)
 
     # Step 2: Verify
+    verify_result = {}
     if skip_verify:
         print_step(2, steps, "Skipping verification")
     else:
@@ -751,7 +752,7 @@ def workflow_new_cert(
     return {
         "success": True,
         "ssl_file_name": ssl_file_name,
-        "staging_ip": lookup_result.get("staging_ip") if not skip_verify else None,
+        "staging_ip": verify_result.get("staging_ip"),
     }
 
 
@@ -803,6 +804,7 @@ def workflow_renew_cert(
     print_success("Staging update successful")
 
     # Step 2: Verify
+    verify_result = {}
     if skip_verify:
         print_step(2, steps, "Skipping verification")
     else:
@@ -827,7 +829,7 @@ def workflow_renew_cert(
     return {
         "success": True,
         "ssl_file_name": ssl_file_name,
-        "staging_ip": lookup_result.get("staging_ip") if not skip_verify else None,
+        "staging_ip": verify_result.get("staging_ip"),
     }
 
 
