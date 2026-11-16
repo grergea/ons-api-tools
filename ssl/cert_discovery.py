@@ -16,14 +16,16 @@ from typing import Optional
 
 DEFAULT_CERT_BASE = Path.home() / "Certificate"
 
-_IGNORED_SUFFIXES = {".zip"}
+# Archives and binary keystores are never read as PEM candidates
+_IGNORED_SUFFIXES = {".zip", ".pfx", ".p12", ".jks"}
 _IGNORED_NAMES = {".ds_store", "fullchain.pem"}
 
 _CHAIN_PATTERN = re.compile(r"chain", re.IGNORECASE)
+_FULLCHAIN_PATTERN = re.compile(r"fullchain", re.IGNORECASE)
 _KEY_PATTERN = re.compile(r"key", re.IGNORECASE)
-_NOPASS_KEY_PATTERN = re.compile(r"^nopass.*key", re.IGNORECASE)
+_NOPASS_KEY_PATTERN = re.compile(r"nopass.*key", re.IGNORECASE)
 _CERT_PATTERN = re.compile(r"cert|\.(crt|cer|pem)$", re.IGNORECASE)
-_BUNDLE_PATTERN = re.compile(r"\.all\.", re.IGNORECASE)
+_BUNDLE_PATTERN = re.compile(r"\.all\.|fullchain", re.IGNORECASE)
 
 
 class CertDiscoveryError(Exception):
@@ -119,9 +121,18 @@ def _discover_in_dir(cert_dir: Path) -> dict:
     """Discover cert/key/chain files directly inside cert_dir."""
     files = _relevant_files(cert_dir)
 
-    chain_candidates = [f for f in files if _CHAIN_PATTERN.search(f.name)]
+    # A vendor "fullchain" file is a cert+chain bundle, not a chain-only file
+    chain_candidates = [
+        f
+        for f in files
+        if _CHAIN_PATTERN.search(f.name) and not _FULLCHAIN_PATTERN.search(f.name)
+    ]
     all_key_files = [
-        f for f in files if _KEY_PATTERN.search(f.name) and f not in chain_candidates
+        f
+        for f in files
+        if _KEY_PATTERN.search(f.name)
+        and f not in chain_candidates
+        and not _FULLCHAIN_PATTERN.search(f.name)
     ]
     nopass_key_candidates = [f for f in files if _NOPASS_KEY_PATTERN.search(f.name)]
     key_candidates = nopass_key_candidates or all_key_files
@@ -151,6 +162,7 @@ def _discover_in_dir(cert_dir: Path) -> dict:
             f"Expected exactly 1 certificate file in {cert_dir}, found "
             f"{len(cert_candidates)}: {[f.name for f in cert_candidates]}"
         )
+    key_candidates = _select_key(cert_candidates[0], all_key_files, key_candidates)
     if len(key_candidates) != 1:
         raise CertDiscoveryError(
             f"Expected exactly 1 private key file in {cert_dir}, found "
@@ -168,6 +180,51 @@ def _discover_in_dir(cert_dir: Path) -> dict:
         "chain": chain_candidates[0] if chain_candidates else None,
         "bundle": bundle,
     }
+
+
+def _public_key(args: list) -> Optional[str]:
+    """Public key PEM printed by `openssl <args>`, or None if it can't be read."""
+    result = subprocess.run(
+        ["openssl", *args],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        stdin=subprocess.DEVNULL,
+    )
+    out = result.stdout.strip()
+    return out if result.returncode == 0 and "BEGIN PUBLIC KEY" in out else None
+
+
+def key_matches_cert(cert_path: Path, key_path: Path) -> Optional[bool]:
+    """True/False if the key pairs with the cert, None if either is unreadable.
+
+    Compares public keys, so it works for RSA and EC. A password-protected key
+    can't be read without the password and yields None.
+    """
+    cert_pub = _public_key(["x509", "-in", str(cert_path), "-pubkey", "-noout"])
+    key_pub = _public_key(["pkey", "-in", str(key_path), "-pubout"])
+    if cert_pub is None or key_pub is None:
+        return None
+    return cert_pub == key_pub
+
+
+def _select_key(cert_path: Path, all_keys: list, name_preferred: list) -> list:
+    """Choose the key by content, falling back to filename when unreadable.
+
+    A key that provably pairs with the certificate wins over any filename
+    heuristic. If every readable key mismatches, raise rather than fall back.
+    """
+    verdicts = {k: key_matches_cert(cert_path, k) for k in all_keys}
+    matching = [k for k, v in verdicts.items() if v is True]
+    if matching:
+        return matching[:1]
+    readable = [k for k, v in verdicts.items() if v is not None]
+    if readable and len(readable) == len(all_keys):
+        raise CertDiscoveryError(
+            f"None of the private key files matches the certificate "
+            f"{cert_path.name}: {[k.name for k in all_keys]}"
+        )
+    return name_preferred
 
 
 def is_key_encrypted(key_path: Path) -> bool:
@@ -229,6 +286,75 @@ def ensure_decrypted_key(key_path: Path, password: Optional[str]) -> Path:
         )
 
     return decrypted_path
+
+
+_DN_CN = re.compile(r"CN\s*=\s*([^,/\n]+)")
+
+
+def describe_certificate(cert_path: Path) -> dict:
+    """Read identity fields straight from the certificate file.
+
+    Callers should identify a certificate by these values, never by the
+    folder or file name it was delivered under.
+    """
+    result = subprocess.run(
+        [
+            "openssl", "x509", "-in", str(cert_path), "-noout",
+            "-serial", "-subject", "-issuer", "-dates", "-ext", "subjectAltName",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        stdin=subprocess.DEVNULL,
+    )  # fmt: skip
+    if result.returncode != 0:
+        raise CertDiscoveryError(
+            f"Cannot read certificate {cert_path}: {result.stderr.strip()}"
+        )
+
+    # Separate call: with -ext in the same invocation, OpenSSL 4.1 prints a
+    # fingerprint that differs from the certificate's real SHA-256 fingerprint.
+    fp = subprocess.run(
+        ["openssl", "x509", "-in", str(cert_path), "-noout", "-fingerprint", "-sha256"],
+        capture_output=True,
+        text=True,
+        timeout=10,
+        stdin=subprocess.DEVNULL,
+    )
+    info = {"san": [], "fingerprint": fp.stdout.strip().split("=", 1)[-1].upper()}
+    for line in result.stdout.splitlines():
+        line = line.strip()
+        if line.startswith("serial="):
+            info["serial"] = line.split("=", 1)[1].upper()
+        elif line.startswith("subject="):
+            m = _DN_CN.search(line)
+            info["subject_cn"] = m.group(1).strip() if m else ""
+        elif line.startswith("issuer="):
+            m = _DN_CN.search(line)
+            info["issuer_cn"] = m.group(1).strip() if m else ""
+        elif line.startswith("notBefore="):
+            info["not_before"] = line.split("=", 1)[1].strip()
+        elif line.startswith("notAfter="):
+            info["not_after"] = line.split("=", 1)[1].strip()
+        elif line.startswith("DNS:"):
+            info["san"] = [
+                part.strip()[4:] for part in line.split(",") if part.strip().startswith("DNS:")
+            ]
+    return info
+
+
+def san_covers_domain(san: list, domain: str) -> bool:
+    """True if any SAN entry covers domain (a wildcard matches exactly one label)."""
+    domain = domain.lower().rstrip(".")
+    for entry in san:
+        entry = entry.lower().rstrip(".")
+        if entry == domain:
+            return True
+        if entry.startswith("*."):
+            head, _, rest = domain.partition(".")
+            if head and rest == entry[2:]:
+                return True
+    return False
 
 
 def build_fullchain(

@@ -22,7 +22,14 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
-from cert_discovery import CertDiscoveryError, get_cert_bundle, resolve_cert_dir
+import live_verify
+from cert_discovery import (
+    CertDiscoveryError,
+    describe_certificate,
+    get_cert_bundle,
+    resolve_cert_dir,
+    san_covers_domain,
+)
 
 
 # --- Configuration ---
@@ -660,18 +667,156 @@ def verify_staged_cert(ssl_file_name: str, auth: dict, ssl_cert: str) -> dict:
         print_error("Failed to lookup certificate")
         return {"success": False, "step": 2}
 
+    staging_ip = lookup_result.get("staging_ip")
     if lookup_result["matched"]:
+        print_success(
+            f"Staging node {staging_ip} serves the uploaded certificate "
+            "(SHA-256 fingerprint MATCH)"
+        )
         _warn_cert_expiry(lookup_result.get("raw", ""))
     elif not lookup_result["verifiable"]:
         print_warning("No staging node to verify against; skipped served-cert check")
     else:
-        print_warning(
-            "Staging node still serves a different certificate than the "
-            "uploaded file (fingerprint mismatch). Expiry shown above belongs "
-            "to that certificate. Re-run 'lookup --verify --local-cert' "
-            "before final deploy"
+        print_error(
+            f"Staging node {staging_ip} still serves a different certificate than "
+            "the uploaded file (fingerprint MISMATCH). Stopping before final deploy. "
+            "Re-run 'lookup --verify' to check again, or 'staging-cancel' to roll back"
         )
-    return {"success": True, "staging_ip": lookup_result.get("staging_ip")}
+        return {"success": False, "step": 2, "staging_ip": staging_ip}
+    return {"success": True, "staging_ip": staging_ip}
+
+
+# --- Pre-flight identity check and post-deploy live check ---
+
+_LIST_ENTRY_HEADER = re.compile(r"^\[(?:ACTIVE|INACTIVE)\]\s+(\S+)\s*$")
+
+
+def parse_list_entry(raw: str, ssl_file_name: str) -> Optional[dict]:
+    """Domains and expiry of one certificate from `list` output, or None."""
+    entry = None
+    for line in _ANSI_ESCAPE.sub("", raw).splitlines():
+        header = _LIST_ENTRY_HEADER.match(line.strip())
+        if header:
+            if entry is not None:
+                break
+            if header.group(1) == ssl_file_name:
+                entry = {"domains": [], "expires": None}
+            continue
+        if entry is None:
+            continue
+        key, _, value = line.strip().partition(":")
+        if key == "Domains":
+            entry["domains"] = [d.strip() for d in value.split(",") if d.strip()]
+        elif key == "Expires":
+            entry["expires"] = value.strip()
+    return entry
+
+
+def fetch_registered_entry(ssl_file_name: str, auth: dict) -> Optional[dict]:
+    """The ONS registration (mapped domains, expiry) for ssl_file_name."""
+    result = run_manager_command(["list", *_auth_args(auth)])
+    return parse_list_entry(result.get("raw", ""), ssl_file_name)
+
+
+def uncovered_domains(cert_info: dict, domains: list) -> list:
+    """Domains that the certificate's SAN list does not cover."""
+    return [d for d in domains if not san_covers_domain(cert_info["san"], d)]
+
+
+def default_memo(cert_info: dict) -> str:
+    """Memo built from the certificate itself, never from its folder name."""
+    return (
+        f"Issuer={cert_info['issuer_cn']}, Serial={cert_info['serial']}, "
+        f"Expires={cert_info['not_after']}"
+    )
+
+
+def preflight_certificate(
+    ssl_cert: str, ssl_file_name: str, auth: dict, domains: Optional[list] = None
+) -> dict:
+    """Identify the certificate from its content and check it fits the target.
+
+    For renew (domains is None) the target's ONS-mapped domains must all be
+    covered by the certificate's SAN; for new, the requested domain list must.
+    """
+    try:
+        info = describe_certificate(Path(ssl_cert))
+    except CertDiscoveryError as e:
+        print_error(str(e))
+        return {"success": False, "step": 0}
+
+    print("\nCertificate to upload (read from file contents):")
+    print(f"  Subject: CN={info['subject_cn']}")
+    print(f"  SAN:     {', '.join(info['san']) or '(none)'}")
+    print(f"  Issuer:  {info['issuer_cn']}")
+    print(f"  Serial:  {info['serial']}")
+    print(f"  Expires: {info['not_after']}")
+
+    registered = None
+    if domains is None:
+        registered = fetch_registered_entry(ssl_file_name, auth)
+        if registered is None:
+            print_error(f"'{ssl_file_name}' is not registered on ONS (use 'new')")
+            return {"success": False, "step": 0}
+        domains = registered["domains"]
+        print(f"\nRegistered on ONS as '{ssl_file_name}':")
+        print(f"  Domains: {', '.join(domains) or '(none)'}")
+        print(f"  Expires: {registered['expires']}")
+
+    if not domains:
+        print_warning(
+            "No domains to check against: whether this is the right certificate "
+            "for the target could not be verified"
+        )
+        return {"success": True, "info": info, "domains": domains}
+
+    missing = uncovered_domains(info, domains)
+    if missing:
+        print_error(
+            f"Certificate does not cover: {', '.join(missing)}. "
+            "Wrong certificate for this target; nothing was uploaded"
+        )
+        return {"success": False, "step": 0}
+
+    print_success(f"SAN covers all {len(domains)} mapped domain(s)")
+    return {"success": True, "info": info, "domains": domains}
+
+
+_LIVE_CHECK_ATTEMPTS = 3
+_LIVE_CHECK_WAIT_SECONDS = 20
+
+
+def post_deploy_live_check(domains: list, cert_info: dict) -> dict:
+    """Confirm every resolved edge IP of each domain serves the new certificate."""
+    hosts = [d for d in domains if not d.startswith("*.")]
+    if not hosts:
+        print_warning("No concrete hostname to check; skipped live check")
+        return {"success": True}
+
+    results = []
+    for attempt in range(1, _LIVE_CHECK_ATTEMPTS + 1):
+        results = [
+            live_verify.verify_host(h, cert_info["fingerprint"]) for h in hosts
+        ]
+        if all(r["ok"] for r in results) or attempt == _LIVE_CHECK_ATTEMPTS:
+            break
+        print_warning(
+            f"Edge not fully updated (attempt {attempt}/{_LIVE_CHECK_ATTEMPTS}), "
+            f"retrying in {_LIVE_CHECK_WAIT_SECONDS}s"
+        )
+        time.sleep(_LIVE_CHECK_WAIT_SECONDS)
+
+    print("\nLive check (IPs returned by the queried resolvers):")
+    for r in results:
+        print(f"  {r['host']}: {r['matched']}/{r['total']} IPs serve serial {cert_info['serial']}")
+        for ip, fp in r["mismatched"].items():
+            print_error(f"    {ip} serves a different certificate ({fp})")
+        for ip in r["unreachable"]:
+            print_warning(f"    {ip} unreachable on 443")
+    ok = all(r["ok"] for r in results)
+    if not ok:
+        print_error("Live check failed: the certificate is deployed but not served everywhere yet")
+    return {"success": ok, "step": 4}
 
 
 # --- Workflow Functions ---
@@ -686,17 +831,27 @@ def workflow_new_cert(
     auth: dict = None,
     skip_verify: bool = False,
     auto_deploy: bool = True,
+    skip_live_verify: bool = False,
 ) -> dict:
     """
     Workflow for new certificate registration.
 
     Steps:
+        0. pre-flight: identify the certificate from its contents, check SAN
         1. staging-deploy
         2. lookup --verify (if not skipped)
         3. deploy (if auto_deploy)
+        4. live check of every resolved edge IP (if deployed and not skipped)
     """
     auth = auth or get_auth_params()
-    steps = 3 if auto_deploy else 2
+    do_live = auto_deploy and not skip_live_verify
+    steps = (3 if auto_deploy else 2) + (1 if do_live else 0)
+
+    requested = [d.strip() for d in (domain_list or "").split(",") if d.strip()]
+    preflight = preflight_certificate(ssl_cert, ssl_file_name, auth, requested)
+    if not preflight["success"]:
+        return preflight
+    memo = memo or default_memo(preflight["info"])
 
     # Step 1: Staging Deploy
     print_step(1, steps, f"Deploying new certificate to staging: {ssl_file_name}")
@@ -749,6 +904,12 @@ def workflow_new_cert(
     else:
         print_warning("Auto-deploy skipped. Run 'deploy' command manually when ready.")
 
+    if do_live:
+        print_step(4, steps, "Checking edge IPs serve the new certificate")
+        live = post_deploy_live_check(preflight["domains"], preflight["info"])
+        if not live["success"]:
+            return {**live, "ssl_file_name": ssl_file_name}
+
     return {
         "success": True,
         "ssl_file_name": ssl_file_name,
@@ -764,17 +925,27 @@ def workflow_renew_cert(
     auth: dict = None,
     skip_verify: bool = False,
     auto_deploy: bool = True,
+    skip_live_verify: bool = False,
 ) -> dict:
     """
     Workflow for existing certificate renewal.
 
     Steps:
+        0. pre-flight: identify the certificate from its contents and check
+           its SAN against the domains registered for ssl_file_name
         1. staging-update
         2. lookup --verify (if not skipped)
         3. deploy (if auto_deploy)
+        4. live check of every resolved edge IP (if deployed and not skipped)
     """
     auth = auth or get_auth_params()
-    steps = 3 if auto_deploy else 2
+    do_live = auto_deploy and not skip_live_verify
+    steps = (3 if auto_deploy else 2) + (1 if do_live else 0)
+
+    preflight = preflight_certificate(ssl_cert, ssl_file_name, auth)
+    if not preflight["success"]:
+        return preflight
+    memo = memo or default_memo(preflight["info"])
 
     # Step 1: Staging Update
     print_step(1, steps, f"Updating certificate on staging: {ssl_file_name}")
@@ -825,6 +996,12 @@ def workflow_renew_cert(
         print_success("Deployment finalized")
     else:
         print_warning("Auto-deploy skipped. Run 'deploy' command manually when ready.")
+
+    if do_live:
+        print_step(4, steps, "Checking edge IPs serve the new certificate")
+        live = post_deploy_live_check(preflight["domains"], preflight["info"])
+        if not live["success"]:
+            return {**live, "ssl_file_name": ssl_file_name}
 
     return {
         "success": True,
@@ -1336,14 +1513,17 @@ def _resolve_cert_key_args(args, required: bool = True):
         sys.exit(1)
 
     domain = getattr(args, "domain", None)
-    if not domain:
+    explicit_dir = getattr(args, "cert_dir", None)
+    if not domain and not explicit_dir:
         if required:
-            print_error("Provide --ssl-cert/--ssl-key, or --domain for auto-detection.")
+            print_error(
+                "Provide --ssl-cert/--ssl-key, --cert-dir, or --domain for auto-detection."
+            )
             sys.exit(1)
         return None, None
 
     try:
-        cert_dir = resolve_cert_dir(domain)
+        cert_dir = Path(explicit_dir) if explicit_dir else resolve_cert_dir(domain)
         password = getattr(args, "ssl_key_password", None) or os.environ.get(
             "ONS_SSL_KEY_PASSWORD"
         )
@@ -1353,6 +1533,45 @@ def _resolve_cert_key_args(args, required: bool = True):
         sys.exit(1)
 
     return str(bundle["fullchain"]), str(bundle["key"])
+
+
+def _run_verify_live(args) -> dict:
+    """verify-live: compare each edge IP's served certificate with a local file."""
+    if args.ssl_cert:
+        cert_path = args.ssl_cert
+    elif args.cert_dir:
+        try:
+            password = args.ssl_key_password or os.environ.get("ONS_SSL_KEY_PASSWORD")
+            cert_path = str(get_cert_bundle(Path(args.cert_dir), password)["cert"])
+        except CertDiscoveryError as e:
+            print_error(str(e))
+            return {"success": False, "step": 1}
+    else:
+        print_error("Provide --ssl-cert or --cert-dir.")
+        return {"success": False, "step": 1}
+
+    try:
+        info = describe_certificate(Path(cert_path))
+    except CertDiscoveryError as e:
+        print_error(str(e))
+        return {"success": False, "step": 1}
+
+    print(f"Expecting serial {info['serial']} (CN={info['subject_cn']}, issuer {info['issuer_cn']})")
+    hosts = [h.strip() for h in args.host.split(",") if h.strip()]
+    return post_deploy_live_check_once(hosts, info)
+
+
+def post_deploy_live_check_once(hosts: list, cert_info: dict) -> dict:
+    """Single-pass live check (no retry) for the standalone verify-live command."""
+    results = [live_verify.verify_host(h, cert_info["fingerprint"]) for h in hosts]
+    for r in results:
+        print(f"{r['host']}: {r['matched']}/{r['total']} IPs match")
+        print(f"  checked: {', '.join(r['ips']) or '(no IPs resolved)'}")
+        for ip, fp in r["mismatched"].items():
+            print_error(f"  {ip} serves a different certificate ({fp})")
+        for ip in r["unreachable"]:
+            print_warning(f"  {ip} unreachable on 443")
+    return {"success": all(r["ok"] for r in results), "step": 1}
 
 
 # --- Argument Parser ---
@@ -1413,6 +1632,11 @@ Examples:
         help="Domain to auto-locate under ~/Certificate/ instead of --ssl-cert/--ssl-key",
     )
     parser_new.add_argument(
+        "--cert-dir",
+        dest="cert_dir",
+        help="Directory holding the delivered files (any name; the key is matched to the certificate by content)",
+    )
+    parser_new.add_argument(
         "--ssl-key-password",
         dest="ssl_key_password",
         help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)",
@@ -1433,6 +1657,12 @@ Examples:
         action="store_true",
         help="Skip automatic final deployment",
     )
+    parser_new.add_argument(
+        "--skip-live-verify",
+        dest="skip_live_verify",
+        action="store_true",
+        help="Skip the post-deploy check of edge IPs",
+    )
 
     def _run_new(args):
         ssl_cert, ssl_key = _resolve_cert_key_args(args)
@@ -1445,6 +1675,7 @@ Examples:
             auth=get_auth_params(args.id, args.api_key),
             skip_verify=args.skip_verify,
             auto_deploy=not args.no_auto_deploy,
+            skip_live_verify=args.skip_live_verify,
         )
 
     parser_new.set_defaults(func=_run_new)
@@ -1471,6 +1702,11 @@ Examples:
         help="Domain to auto-locate under ~/Certificate/ instead of --ssl-cert/--ssl-key",
     )
     parser_renew.add_argument(
+        "--cert-dir",
+        dest="cert_dir",
+        help="Directory holding the delivered files (any name; the key is matched to the certificate by content)",
+    )
+    parser_renew.add_argument(
         "--ssl-key-password",
         dest="ssl_key_password",
         help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)",
@@ -1488,6 +1724,12 @@ Examples:
         action="store_true",
         help="Skip automatic final deployment",
     )
+    parser_renew.add_argument(
+        "--skip-live-verify",
+        dest="skip_live_verify",
+        action="store_true",
+        help="Skip the post-deploy check of edge IPs",
+    )
 
     def _run_renew(args):
         ssl_cert, ssl_key = _resolve_cert_key_args(args)
@@ -1499,6 +1741,7 @@ Examples:
             auth=get_auth_params(args.id, args.api_key),
             skip_verify=args.skip_verify,
             auto_deploy=not args.no_auto_deploy,
+            skip_live_verify=args.skip_live_verify,
         )
 
     parser_renew.set_defaults(func=_run_renew)
@@ -1537,6 +1780,11 @@ Examples:
         "--domain",
         dest="domain",
         help="Domain to auto-locate under ~/Certificate/ for a certificate rotation (optional)",
+    )
+    parser_domains.add_argument(
+        "--cert-dir",
+        dest="cert_dir",
+        help="Directory holding the delivered files (any name; the key is matched to the certificate by content)",
     )
     parser_domains.add_argument(
         "--ssl-key-password",
@@ -1638,6 +1886,29 @@ Examples:
             or os.environ.get("ONS_SSL_KEY_PASSWORD"),
         )
     )
+
+    # --- verify-live command ---
+    parser_live = subparsers.add_parser(
+        "verify-live",
+        help="Check every edge IP of host(s) serves the given certificate",
+    )
+    parser_live.add_argument(
+        "--host", required=True, help="Comma-separated hostnames to check"
+    )
+    parser_live.add_argument(
+        "--ssl-cert", dest="ssl_cert", help="Certificate file the edge should serve"
+    )
+    parser_live.add_argument(
+        "--cert-dir",
+        dest="cert_dir",
+        help="Directory containing certificate files (auto-detected filenames)",
+    )
+    parser_live.add_argument(
+        "--ssl-key-password",
+        dest="ssl_key_password",
+        help="Password to locally decrypt an encrypted private key (or set ONS_SSL_KEY_PASSWORD)",
+    )
+    parser_live.set_defaults(func=_run_verify_live)
 
     # --- lookup command ---
     parser_lookup = subparsers.add_parser(

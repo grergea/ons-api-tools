@@ -82,5 +82,20 @@ class ResolveCertKeyArgsTests(unittest.TestCase):
             wf._resolve_cert_key_args(args, required=True)
 
 
+class ResolveCertKeyFromCertDirTests(unittest.TestCase):
+    @patch("ssl_workflow.get_cert_bundle")
+    def test_cert_dir_is_used_without_any_folder_naming_convention(self, mock_bundle):
+        mock_bundle.return_value = {
+            "fullchain": Path("/any/where/fullchain.pem"),
+            "key": Path("/any/where/key.pem"),
+        }
+        args = _ns(cert_dir="/any/where")
+
+        result = wf._resolve_cert_key_args(args)
+
+        self.assertEqual(result, ("/any/where/fullchain.pem", "/any/where/key.pem"))
+        self.assertEqual(mock_bundle.call_args.args[0], Path("/any/where"))
+
+
 if __name__ == "__main__":
     unittest.main()
